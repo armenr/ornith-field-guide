@@ -82,8 +82,9 @@ CLAUDE.md                  # operational brain — Claude Code reads this automa
 README.md                  # this file
 scripts/
   download.sh              # resumable parallel HF downloader (beats throttling/Xet)
-  serve-35b.sh             # serve 35B: -ngl 99 --n-cpu-moe 6, the fast/fits config
+  serve-35b.sh             # serve 35B (llama.cpp): -ngl 99 --n-cpu-moe 6, the fast/fits config
   serve-9b.sh              # serve 9B fully on GPU
+  serve-vllm-nvfp4.sh      # Path A (verified): vLLM + NVFP4 in Docker — concurrency/native tool-calls
   smoke-test.sh            # health + tok/s + reasoning-split check
   selffix_loop.py          # agentic compile→fix→retry harness (problems: eval, trie, regex)
 docs/

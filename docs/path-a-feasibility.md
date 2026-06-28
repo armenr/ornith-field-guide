@@ -1,6 +1,51 @@
-# Path A (vLLM + NVFP4) feasibility on a single RTX 5090 — as of 2026-06
+# Path A (vLLM + NVFP4) on a single RTX 5090
 
-**Verdict: moderate-to-hard, and it may not work cleanly *today*. The weights are ready; the blocker
+## ✅ UPDATE — IT WORKS (verified 2026-06-28)
+
+vLLM serves the NVFP4 35B **in Docker, on a single 5090, with zero host installs**, generating correct
+code and emitting real OpenAI‑style `tool_calls`. The scary SM120 NVFP4‑MoE kernel failures never
+showed up — **Marlin was auto‑selected and stable.** The actual blocker was plain VRAM budgeting.
+Working command is in `scripts/serve-vllm-nvfp4.sh`; the load‑bearing flags:
+`--device nvidia.com/gpu=all --ipc=host`, mount the model at `/model`, `--language-model-only`
+(skip the vision tower — yes, it's multimodal), `--gpu-memory-utilization 0.78 --max-num-seqs 1`
+(the OOM fix), `--kv-cache-dtype fp8`, `--enforce-eager`, `--tool-call-parser qwen3_xml --reasoning-parser qwen3`.
+
+**What actually mattered (vs the predicted failure modes):**
+- **Marlin auto‑selected.** Our `VLLM_*_MARLIN` env vars were "unknown" in this nightly, but vLLM fell
+  back to Marlin anyway ("Your GPU does not have native support for FP4 … Marlin"). No forcing needed.
+- **The real blocker was OOM, not kernels.** It loaded, then the first forward OOM'd in the
+  linear‑attention op (`fla/ops/chunk_o.py`): KV cache filled the 0.85 budget, leaving no room for
+  activations. Fix = `--gpu-memory-utilization 0.78 --max-num-seqs 1`.
+- **`--enforce-eager` kept** (dodges the SM120 CUDA‑graph crash). It costs speed — see below.
+
+**Results:** ~26 tok/s; correct Rust (`finish=stop`); `tool_calls` emit correctly.
+
+### Why it's ~26 tok/s here but ~151 in llama.cpp (Q6_K)
+It is **not apples‑to‑apples** — this is the *stable* number, not the ceiling:
+1. **`--enforce-eager` disables CUDA graphs**, so at batch=1 every token pays full kernel‑launch
+   overhead (the thing graphs exist to erase). We turned them off to avoid the SM120 graph crash.
+2. **FP4 tensor cores are unused** — the native NVFP4 kernels crash on consumer Blackwell, so we run
+   **Marlin (W4A16)**: 4‑bit storage but 16‑bit compute. The marquee speedup is disabled.
+3. **vLLM is a throughput engine at batch=1** — its batching/paged‑attention/scheduler overhead is
+   meant to amortize across many concurrent requests; alone, it's pure overhead. llama.cpp is tuned
+   for the single‑user case.
+4. Less‑optimized hybrid‑attention path (it JIT‑compiled Triton kernels mid‑inference).
+
+**To go faster:** drop `--enforce-eager` / try `--cudagraph-mode PIECEWISE` (risks the SM120 crash),
+or **send concurrent requests** — vLLM's batching is where it beats llama.cpp.
+
+**Caveats:** the chosen quant uses per‑layer (not shared) NVFP4 scales for q/k/v → vLLM warns of
+possible slight accuracy loss. And the verbose‑reasoner gotcha applies (tiny `max_tokens` → empty
+`content`; give it a few thousand).
+
+**Bottom line:** Path A works and is the right call for **concurrency / native tool‑parsing**. For
+**single‑stream coding, Path B (llama.cpp) is ~6× faster and simpler** — still the daily driver.
+
+---
+
+*Original pre‑attempt feasibility assessment (now mostly confirmed) follows.*
+
+**Verdict (pre‑attempt): moderate-to-hard, and it may not work cleanly *today*. The weights are ready; the blocker
 is that NVFP4-MoE on consumer Blackwell (SM120) in vLLM is bleeding-edge with documented instability.**
 Worth a timeboxed attempt if you want concurrency/native tool-parsing — but llama.cpp (Path B) is
 faster single-stream and rock-solid right now.

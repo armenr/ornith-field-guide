@@ -1,0 +1,19 @@
+# Model weights — NEVER commit these (tens of GB). Download via scripts/download.sh.
+*.gguf
+*.safetensors
+*.bin
+*.gguf.part*
+models/
+
+# Self-fix loop outputs / compiled test artifacts
+scripts/runs/
+loop_*.rs
+loop_*.bin
+*.rs.bin
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

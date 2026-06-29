@@ -27,18 +27,20 @@ cmake --build llama.cpp/build --config Release -j --target llama-server
 **Serve it** (this is what we actually ran):
 ```bash
 ./llama.cpp/build/bin/llama-server \
-  -m ./ornith-1.0-35b-Q6_K.gguf \   # Q4_K_M (~20GB) fits easily; Q5/Q6 if you want max correctness
+  -m ./ornith-1.0-35b-Q4_K_M.gguf \  # ⭐ optimized: 21GB fits FULLY on a 32GB card -> no offload
   --host 0.0.0.0 --port 8000 \
-  -ngl 99 \                 # all layers on GPU
-  --n-cpu-moe 6 \           # ONLY if VRAM is tight (other apps on the GPU); see offload note
+  -ngl 99 \                 # all layers on GPU (Q4_K_M needs NO --n-cpu-moe — that's the speed unlock)
   -fa on \
   -c 65536 \                # context (KV is cheap here — see below)
   --jinja \                 # loads the chat template → tool calling parses correctly
   --reasoning-format deepseek   # splits <think> into a separate reasoning_content field
+# For Q6_K (28.5GB, max-fidelity fallback) ADD `--n-cpu-moe 6` — it can't fit fully, so offload is forced.
 ```
-- **Quant choice:** Q4_K_M (~20 GB) leaves the most headroom and fits trivially; the 35B's value is
-  *correctness*, so **Q5_K_M/Q6_K** (~25/28.5 GB) is worth it if it fits — and with KV being cheap,
-  it does. (We ran Q6_K throughout.)
+- **Quant choice (measured — `docs/optimized-config.md`):** **Q4_K_M is the optimized pick.** It fits
+  *fully* on the 32 GB card → no `--n-cpu-moe` → ~237 tok/s, and its code correctness is a **wash** with
+  Q6_K. (We initially assumed Q6 was worth it for correctness; a controlled study found no measurable
+  difference.) Q6_K (28.5 GB) is a max-fidelity fallback that *must* offload to fit and runs ~150 tok/s —
+  don't pay for it expecting better code.
 - **`--jinja`** is the important flag for agentic use (tool-call parsing). `--reasoning-format
   deepseek` surfaces the `<think>` block as `reasoning_content`, like vLLM.
 
@@ -72,8 +74,9 @@ every 4th) + GQA with 2 KV heads → **~20 KiB/token** (measured on the card: 25
 - 64K ≈ ~1.3 GB KV · 128K ≈ ~2.5 GB · **256K ≈ ~5 GB** (native trained max is 256K).
 - KV quant (`-ctk q8_0 -ctv q8_0` / `--kv-cache-dtype fp8`) is a nice-to-have, **not** the critical
   lever it is elsewhere. Don't let "KV is expensive" advice scare you off long context here.
-- If VRAM is tight, free it the *MoE* way: **`--n-cpu-moe N`** (park cold experts on CPU, keep
-  attention on GPU) → 151 tok/s. **Do not** use whole-layer offload (`-ngl 34`) → tanks to ~50 tok/s.
+- If a model doesn't fit (Q6_K), free VRAM the *MoE* way: **`--n-cpu-moe N`** (park cold experts on CPU,
+  keep attention on GPU) → ~150 tok/s. **Q4_K_M fits fully → no offload → ~237 tok/s** (the better
+  default). **Never** use whole-layer offload (`-ngl 34`) → tanks to ~50 tok/s.
 
 ## Sampling + output budget (get these wrong and it misbehaves)
 - **temp 0.6, top_p 0.95, top_k 20** (benchmarks use 1.0; 0.6 is the daily-driver rec). Low temp →

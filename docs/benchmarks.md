@@ -1,17 +1,21 @@
 # Measurements & Benchmarks (RTX 5090, 32 GB)
 
-All numbers measured on a single RTX 5090 (32 GB), Q6_K GGUF via llama.cpp, official sampling
-(temp 0.6 / top_p 0.95 / top_k 20). Your hardware (same GPU, top-end Intel, lots of DDR5) should
-match the GPU-bound numbers closely; the CPU-offload numbers depend on DDR5 bandwidth.
+All numbers measured on a single RTX 5090 (32 GB) across llama.cpp (Q4_K_M / Q6_K GGUF) and vLLM
+(NVFP4), at the official sampling (temp 0.6 / top_p 0.95 / top_k 20). Your hardware (same GPU, top-end
+Intel, lots of DDR5) should match the GPU-bound numbers closely; the CPU-offload numbers depend on DDR5
+bandwidth (and the recommended Q4_K_M path uses no offload at all).
 
 ## Throughput (single-stream decode)
 
 | Model / config | tok/s | notes |
 |---|---|---|
-| 9B Q6_K, `-ngl 99` (full GPU) | ~130–134 | fits in ~9.5 GB |
-| 35B Q6_K, `-ngl 99 --n-cpu-moe 6` | **151** | **recommended**; fits ~25 GB, leaves room for other apps |
-| 35B Q6_K, `-ngl 99` (full GPU, empty card) | ~144 | needs the card mostly free |
+| **35B Q4_K_M, `-ngl 99` (full GPU, NO offload)** | **237–242** | **⭐ recommended daily driver**; 21 GB fits fully (~26 GB w/ KV @ -c 65536) |
+| 35B Q4_K_M, `-ngl 99 --n-cpu-moe 6` | ~145–200 | offload *hurts* a model that already fits — don't |
+| 35B Q6_K, `-ngl 99 --n-cpu-moe 6` | ~150 | max-fidelity fallback; 28.5 GB can't fit fully → offload forced |
+| 35B Q6_K, `-ngl 99` (full GPU, *truly empty* card) | ~144 | only fits fully with NO desktop using VRAM; with a ~3 GB desktop it doesn't fit → use `--n-cpu-moe` |
 | 35B Q6_K, `-ngl 34` (whole-layer offload) | ~50 | ❌ avoid — drops attention to CPU |
+| 9B Q6_K, `-ngl 99` (full GPU) | ~130–134 | fits in ~9.5 GB |
+| vLLM NVFP4 (Marlin, CUDA graphs) | 214 / 232 (fp8 / f16 KV) | concurrency path; but 67% single-stream reasoning loop |
 
 The 35B (MoE) is *faster* than the 9B (dense) despite being ~4× larger: only ~2–3B of its 35B
 params are active per token. That's also why **GPU utilization looks low during generation**
@@ -29,7 +33,7 @@ prompt prefill.
 | **Q6_K** | **7.4 GB** | **28.5 GB** | 342 GB |
 | Q4_K_M | 5.6 GB | 21.2 GB | 242 GB |
 | Q8_0 | 9.5 GB | 36.9 GB | ~435 GB |
-| fits one 5090? | ✅ easily | ✅ at Q4–Q6 (Q6_K recommended) | ❌ (needs big RAM, IQ2 ≈ 106–140 GB) |
+| fits one 5090? | ✅ easily | ✅ at Q4–Q6 (**Q4_K_M recommended** — fits fully, no offload) | ❌ (needs big RAM, IQ2 ≈ 106–140 GB) |
 
 GGUF quant ladders exist from `deepreinforce-ai/*-GGUF` (official) and `bartowski/*` (imatrix).
 Hybrid linear attention (full attention only every 4th layer) makes the KV cache cheap, so large
@@ -71,3 +75,28 @@ actionable feedback. Under those conditions it self-corrects hard problems to pa
 contrast, improves locally but oscillates/regresses and can't land — a feedback loop *amplifies*
 capability, it doesn't create it. Trust the 35B in agentic/iterative loops; treat the 9B's output as
 a draft to verify.
+
+> **Note (2026-06-29 study):** the regex "converged in 3" was a *single lucky draw*, not a reliable
+> property — regex convergence is stochastic (the model can stay verbose and fail to commit ~1/5 of
+> runs on *any* config). See the loop study below and `docs/precision-and-reasoning-loops.md`.
+
+## Quant × engine: reasoning-loop rate & the optimized config (2026-06-29)
+
+Controlled study (`docs/precision-and-reasoning-loops.md`). Metric = reasoning-loop rate on the hardest
+self-fix task (backtracking regex), **N=15 seeds**, loop = reasoning-uniqueness < 0.40.
+
+| config | engine | quant | KV | loop-rate | 95% CI (Wilson) |
+|---|---|---|---|---|---|
+| NVFP4 (fp8 KV) | vLLM | NVFP4 | fp8 | **67%** | [42%, 85%] |
+| NVFP4 (f16 KV) | vLLM | NVFP4 | f16 | **67%** | [42%, 85%] |
+| Q6_K | llama.cpp | Q6_K | f16 | 7%* | [1%, 30%] |
+| Q4_K_M | llama.cpp | Q4_K_M | f16 | 0%* | [0%, 20%] |
+
+\* 16K-window lower bound — a full-trace (56K) analysis shows both k-quants loop **~1/5** (some loops
+develop gradually past 16K). **KV precision is null** (fp8 == f16); **4-bit vs 6-bit is a wash**. The
+67% is an **NVFP4-format + vLLM/Marlin-decode artifact on SM120, not bit-width** (clean controls).
+vLLM is also *non-deterministic* here (same seed → uniq 0.23/0.42/0.47), so loop-*rate* is the statistic.
+
+**Code-correctness battery** (eval+trie, 5 seeds, compiles **and** passes tests): **Q4_K_M 10/10**,
+**Q6_K 8/10**, NVFP4 ties on `eval` (2 rounds) → **a wash within variance.** Quality is indistinguishable
+across quants; pick by speed/fit → **Q4_K_M** (fastest, fits fully). See `docs/optimized-config.md`.

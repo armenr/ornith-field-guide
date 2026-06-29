@@ -96,11 +96,16 @@ SYS = ("You are a senior Rust engineer. Provide one complete, correct, idiomatic
        "root cause and return the FULL corrected program.")
 
 def chat(messages):
-    body = json.dumps({"model":"x","messages":messages,"temperature":0.6,"top_p":0.95,
-                       "top_k":20,"min_p":0,"seed":7,"max_tokens":32000}).encode()
+    # max_tokens MUST be large: Ornith reasons ~30K+ tokens on hard problems (regex needed >32K
+    # of thinking alone). Too small a budget => it never closes </think>, content is empty, and the
+    # loop "fails" on a phantom missing-function error. Override with MAXTOK; default fits 65536 ctx.
+    body = json.dumps({"model":os.environ.get("MODEL","x"),"messages":messages,"temperature":0.6,"top_p":0.95,
+                       "top_k":20,"min_p":0,"seed":int(os.environ.get("SEED","7")),
+                       "max_tokens":int(os.environ.get("MAXTOK","48000"))}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat/completions", body,
                                  {"Content-Type":"application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=900))["choices"][0]["message"]
+    ch = json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]
+    return ch["message"], ch.get("finish_reason")
 
 def extract_code(t):
     b = re.findall(r"```(?:rust)?\s*\n(.*?)```", t, re.S)
@@ -125,7 +130,17 @@ for _ in range(180):
 messages=[{"role":"system","content":SYS},{"role":"user","content":TASK}]
 ok=False
 for it in range(1, MAXIT+1):
-    msg=chat(messages); content=msg.get("content") or ""; rlen=len(msg.get("reasoning_content") or "")
+    msg,finish=chat(messages); content=msg.get("content") or ""
+    # vLLM nightly exposes chain-of-thought as `reasoning`; llama.cpp/deepseek as `reasoning_content`.
+    rlen=len(msg.get("reasoning") or msg.get("reasoning_content") or "")
+    if finish=="length" and not content.strip():
+        print(f"[{LABEL}] iter {it}: think={rlen}c  finish=length, NO code emitted "
+              f"(reasoning consumed the whole budget) → raise MAXTOK")
+        messages.append({"role":"assistant","content":"(ran out of token budget while reasoning)"})
+        messages.append({"role":"user","content":"You exhausted the output budget while thinking and "
+                         "produced no code. Reason more concisely, then output the COMPLETE program in "
+                         "one ```rust block."})
+        continue
     code=strip_main(extract_code(content))
     path=f"{SCR}/loop_{LABEL}_{it}.rs"; open(path,"w").write(code+"\n"+TEST_MAIN)
     comp=subprocess.run(["rustc","-O",path,"-o",f"{SCR}/loop_{LABEL}_{it}.bin"],capture_output=True,text=True)

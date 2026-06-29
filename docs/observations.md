@@ -18,14 +18,19 @@ Gemma 4 / Qwen 3.5 with an RL framework where the model learns its own task scaf
 errors, but given the errors it fixes them cleanly in one round. Self-corrects reliably. This is the
 one to actually use for coding.
 
-**We never actually found the 35B's ceiling.** Every apparent failure during testing traced back to
-*our* configuration, not the model: the early "doom loops" were wrong temperature; the LRU "regression"
-and the regex "plateau" were a too-small `max_tokens` truncating its ~30K-token reasoning; the regex
-"can't converge" was *also* a misleading test harness (a function-name collision producing errors the
-model couldn't act on). Each time we removed the artificial constraint, it cleared the bar — including
-solving and self-correcting a full backtracking **regex engine** (literals, `.`, `*`/`+`/`?`, groups,
-alternation, full-match) to passing in 3 rounds. Treat reports of "the model can't do X" with
-suspicion until you've confirmed temperature, output budget, and feedback quality are all correct.
+**We *mostly* never found the 35B's ceiling — but there's one genuine failure mode.** Most apparent
+failures traced back to *our* configuration, not the model: the early "doom loops" were wrong
+temperature; the LRU "regression" and the regex "plateau" were a too-small `max_tokens` truncating its
+~30K-token reasoning; one regex "can't converge" was a misleading harness (a function-name collision).
+Remove those constraints and it clears the bar, including solving a full backtracking **regex engine**.
+**But** a later controlled study (`docs/precision-and-reasoning-loops.md`) found a *real* stochastic
+failure on the hardest, most open-ended problems: the model sometimes **fails to commit** at a reasoning
+fork and loops *"let me try a different approach"* until it exhausts the budget. On llama.cpp (any
+k-quant) that's **~1/5 of runs** — usually cleared by a retry. On **vLLM/NVFP4 it's ~67%** (an
+NVFP4-format + vLLM-decode artifact, *not* bit-width). So the "regex in 3 rounds" was one lucky draw,
+not a guarantee. Still treat "the model can't do X" with suspicion (check temperature, budget, feedback
+first) — but know that on the very hardest problems there *is* an occasional commit-failure loop:
+detect it (low reasoning-uniqueness / `finish=length` with empty `content`) and retry with a new seed.
 
 **9B (dense) — capable-looking, frequently wrong.** It writes confident, well-decorated code
 (doc comments, `NonNull`, even unit tests) but on hard ownership problems it:
@@ -47,9 +52,11 @@ discard its prose (its explanations hallucinate stdlib facts even when the code 
   ~2–3B active). Not a misconfiguration.
 
 ## Hardware fit for *this* class of machine (RTX 5090 + lots of DDR5)
-- 9B and 35B: covered above; 35B Q6_K with `--n-cpu-moe` is the daily driver.
+- 9B and 35B: covered above. **35B Q4_K_M (`-ngl 99`, no offload, `-c 65536`) is the daily driver** —
+  fits fully, ~237 tok/s, quality a wash with Q6_K. Q6_K (`--n-cpu-moe`, ~150 tok/s) is the max-fidelity fallback.
 - 397B: won't fit VRAM. With "tons of DDR5" (128 GB+) you *could* run it at IQ2_XXS (~106 GB) split
   across GPU+RAM via llama.cpp `-ot`/`--n-cpu-moe`, but expect a few tok/s and degraded quality.
   Not recommended over the 35B for day-to-day.
-- Intel vs AMD is irrelevant to the GPU path; it only affects the speed of CPU-offloaded experts
-  (DDR5 bandwidth). A top-end Intel + fast DDR5 will match or beat our AMD numbers.
+- Intel vs AMD is irrelevant to the GPU path; it only affects CPU-offloaded experts (DDR5 bandwidth).
+  On the *offloaded* paths (Q6_K, 397B) a top-end Intel with comparable DDR5 should perform similarly —
+  untested here. The optimized **Q4_K_M path is fully on GPU**, so CPU/RAM choice doesn't affect it.

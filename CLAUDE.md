@@ -12,24 +12,45 @@ loops or truncated/empty answers. This was the cause of every "the model is brok
 wasn't the model, it was the settings.
 
 ## What fits this hardware
-- **9B Q6_K (7.4 GB):** fits fully on GPU, ~130 tok/s. Fine for trivial code; verify anything hard
-  (it writes confident-but-wrong code and can't reliably self-correct).
-- **35B MoE Q6_K (28.5 GB): the daily driver.** ~2–3B active params/token → ~151 tok/s. Logically
-  correct code, self-corrects from compiler errors in ~1 round. **Use this for real work.**
-- **397B:** won't fit; skip unless experimenting with IQ2 in RAM.
-- The 31B Dense is **unreleased** — don't try to download it.
+- **35B MoE Q4_K_M (21 GB): THE daily driver.** Fits *fully* on the 32 GB card → run with **no CPU
+  offload** → **~237 tok/s** sustained. Quality is a wash with Q6_K (measured). **Use this for real
+  work.** (`scripts/serve-q4.sh`; full study `docs/optimized-config.md`.)
+- **35B MoE Q6_K (28.5 GB):** max-fidelity fallback. Doesn't fit fully → needs `--n-cpu-moe` → ~150
+  tok/s. Same correctness as Q4_K_M; only worth it if you specifically want maximum weight fidelity.
+- **9B Q6_K (7.4 GB):** fits fully, ~130 tok/s. Trivial code / drafts only; verify anything hard
+  (confident-but-wrong, doesn't reliably self-correct).
+- **397B:** won't fit; skip. The 31B Dense is **unreleased** — don't try to download it.
 
-## Serving (llama.cpp — preferred; it has the knobs)
+## Serving (llama.cpp — the daily-driver path)
 Set `LLAMA_SERVER` to a CUDA llama-server binary (Blackwell needs CUDA ≥12.8). Then:
 ```bash
-scripts/serve-35b.sh        # -ngl 99 --n-cpu-moe 6 -c 32768 -fa on --jinja --reasoning-format deepseek --reasoning-budget -1
-scripts/serve-9b.sh         # -ngl 99 ...
+scripts/serve-q4.sh         # ⭐ Q4_K_M, -ngl 99 (NO offload), -c 65536, ~237 tok/s — the optimized default
+scripts/serve-35b.sh        # Q6_K, -ngl 99 --n-cpu-moe 6 -c 32768 — max-fidelity fallback (~150 tok/s)
+scripts/serve-9b.sh         # 9B, fully on GPU
 scripts/smoke-test.sh 8095  # verify + show tok/s
 ```
 - Start the server detached; poll `GET /health` with `curl --retry-connrefused` (NOT shell `sleep`).
-- **One model per GPU at a time** (9B + 35B won't co-reside in 32 GB) — stop one before starting the other.
-- `--n-cpu-moe 6` is why the 35B fits around other GPU usage at full speed; keep attention on GPU,
-  experts on CPU. **Never** use whole-layer `-ngl 34` (that's the ~50 tok/s trap).
+- **One model per GPU at a time** — stop one before starting another.
+- **Q4_K_M fits fully → `-ngl 99` with NO `--n-cpu-moe`** (offload only HURTS a model that already
+  fits). Q6_K (28.5 GB) *doesn't* fit, so it needs `--n-cpu-moe 6` (experts→CPU, attention→GPU).
+  **Never** use whole-layer `-ngl 34` (the ~50 tok/s trap).
+
+## Serving (Path A — vLLM + NVFP4 in Docker; for concurrency / native tool-parsing)
+Zero host installs beyond Docker + nvidia-container-toolkit. **Verified on the 5090 (SM120).**
+```bash
+export MODEL_DIR=$HOME/models/ornith-nvfp4   # model.safetensors + chat_template.jinja
+docker compose up -d            # or: scripts/serve-vllm-nvfp4.sh   (MODE=fast default)
+scripts/smoke-vllm.sh           # proves it answers + THINKS + reports tok/s
+```
+- **MODE=fast (default) keeps CUDA graphs → ~214 tok/s** — faster than offload-forced Q6_K (~150), but
+  *slower* than the Q4_K_M daily driver (~237). Use vLLM for **concurrency**, not single-stream speed.
+  Only fall back to `MODE=stable` (`--enforce-eager`, ~26 tok/s) if you hit a CUDA-graph crash/hang.
+- **Force Marlin (W4A16)** via the env vars in the script — native NVFP4-MoE kernels crash on SM120.
+- VRAM: `--gpu-memory-utilization 0.75 --max-num-seqs 1 --kv-cache-dtype fp8` (the OOM fix).
+- **Caveat: vLLM/NVFP4 falls into a reasoning *loop* ~67% of the time on the hardest single-stream
+  tasks** — an NVFP4-format + vLLM-decode artifact, NOT bit-width (clean controls in
+  `docs/precision-and-reasoning-loops.md`). Its *code* is fine (eval ties), but for single-stream
+  reliability use llama.cpp **Q4_K_M**. Reserve vLLM for **concurrency** (many parallel agents).
 
 ## Querying (OpenAI-compatible)
 ```bash
@@ -38,9 +59,14 @@ curl -s http://127.0.0.1:8095/v1/chat/completions -d '{
   "temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0,"max_tokens":12000
 }'
 ```
-- Final answer → `choices[0].message.content`. Chain-of-thought → `choices[0].message.reasoning_content`
-  (because the server runs `--reasoning-format deepseek`). If you ever see `<think>` inside `content`,
-  the reasoning parser isn't on.
+- Final answer → `choices[0].message.content`. Chain-of-thought field name **depends on the server**:
+  - **llama.cpp** (`--reasoning-format deepseek`) → `message.reasoning_content`.
+  - **vLLM** (`--reasoning-parser qwen3`) → `message.reasoning`. ← easy to miss; an empty
+    `reasoning_content` on vLLM does **not** mean thinking is off — check `reasoning`.
+  - If you ever see `<think>` inside `content`, the reasoning parser isn't on.
+- **`finish_reason:"length"` with empty `content` = the model used the whole budget *thinking* and never
+  emitted the answer.** Raise `max_tokens` (the regex task alone needed >32K thinking tokens). This is
+  the single most common "it returned nothing / it's broken" cause on hard problems.
 - **Give big `max_tokens` (≥ 32000) and `-c` ≥ 65536.** It's an extremely verbose reasoner
   (~30,000 thinking tokens on hard problems). Too-small a budget truncates the answer and makes the
   model *look* broken — this is the #2 mistake after wrong temperature. Empty `content` +

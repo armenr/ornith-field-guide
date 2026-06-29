@@ -1,45 +1,56 @@
 # Path A (vLLM + NVFP4) on a single RTX 5090
 
-## ✅ UPDATE — IT WORKS (verified 2026-06-28)
+## UPDATE — vLLM/NVFP4 runs on a single 5090 (functional verify 2026-06-28; loop study 2026-06-29)
 
 vLLM serves the NVFP4 35B **in Docker, on a single 5090, with zero host installs**, generating correct
-code and emitting real OpenAI‑style `tool_calls`. The scary SM120 NVFP4‑MoE kernel failures never
-showed up — **Marlin was auto‑selected and stable.** The actual blocker was plain VRAM budgeting.
-Working command is in `scripts/serve-vllm-nvfp4.sh`; the load‑bearing flags:
-`--device nvidia.com/gpu=all --ipc=host`, mount the model at `/model`, `--language-model-only`
-(skip the vision tower — yes, it's multimodal), `--gpu-memory-utilization 0.78 --max-num-seqs 1`
-(the OOM fix), `--kv-cache-dtype fp8`, `--enforce-eager`, `--tool-call-parser qwen3_xml --reasoning-parser qwen3`.
+code, emitting real OpenAI‑style `tool_calls`, **engaging its full `<think>` reasoning**, and decoding
+at **~214 tok/s** (faster than offload-forced Q6_K's ~151, but slower than the Q4_K_M daily driver's ~237). The scary SM120 NVFP4‑MoE kernel failures
+never showed up — **Marlin was auto‑selected and stable.** One command: `docker compose up -d`
+(or `scripts/serve-vllm-nvfp4.sh`); verify with `scripts/smoke-vllm.sh`.
 
 **What actually mattered (vs the predicted failure modes):**
 - **Marlin auto‑selected.** Our `VLLM_*_MARLIN` env vars were "unknown" in this nightly, but vLLM fell
   back to Marlin anyway ("Your GPU does not have native support for FP4 … Marlin"). No forcing needed.
 - **The real blocker was OOM, not kernels.** It loaded, then the first forward OOM'd in the
   linear‑attention op (`fla/ops/chunk_o.py`): KV cache filled the 0.85 budget, leaving no room for
-  activations. Fix = `--gpu-memory-utilization 0.78 --max-num-seqs 1`.
-- **`--enforce-eager` kept** (dodges the SM120 CUDA‑graph crash). It costs speed — see below.
+  activations. Fix = `--gpu-memory-utilization 0.75 --max-num-seqs 1`.
+- **CUDA graphs are FINE on Marlin.** We initially kept `--enforce-eager` (~26 tok/s) fearing the SM120
+  graph crash. Dropping it (the `MODE=fast` default) enables CUDA graphs → **214 tok/s, stable across
+  sustained requests.** The crash is a *native‑FP4‑kernel* problem; on Marlin (W4A16) graphs are safe.
+  Keep `MODE=stable` (`--enforce-eager`) only as a fallback if you ever see a decode‑time graph crash.
 
-**Results:** ~26 tok/s; correct Rust (`finish=stop`); `tool_calls` emit correctly.
+### The two gotchas that look like bugs but aren't
+1. **Reasoning lives in `message.reasoning`, not `reasoning_content`** (vLLM `--reasoning-parser qwen3`).
+   An empty `reasoning_content` does **not** mean thinking is off — we briefly believed vLLM wasn't
+   reasoning; it was, we were reading the wrong field. (llama.cpp's deepseek parser uses
+   `reasoning_content`; vLLM uses `reasoning`.)
+2. **`finish_reason:"length"` + empty `content` = it spent the whole budget thinking.** Same verbose‑
+   reasoner trap as Path B, just bigger: on the regex task the *reasoning alone* blew past 32K **and**
+   56K tokens. Raise `max_tokens` (and don't mistake "still thinking" for "wrong/empty answer").
 
-### Why it's ~26 tok/s here but ~151 in llama.cpp (Q6_K)
-It is **not apples‑to‑apples** — this is the *stable* number, not the ceiling:
-1. **`--enforce-eager` disables CUDA graphs**, so at batch=1 every token pays full kernel‑launch
-   overhead (the thing graphs exist to erase). We turned them off to avoid the SM120 graph crash.
-2. **FP4 tensor cores are unused** — the native NVFP4 kernels crash on consumer Blackwell, so we run
-   **Marlin (W4A16)**: 4‑bit storage but 16‑bit compute. The marquee speedup is disabled.
-3. **vLLM is a throughput engine at batch=1** — its batching/paged‑attention/scheduler overhead is
-   meant to amortize across many concurrent requests; alone, it's pure overhead. llama.cpp is tuned
-   for the single‑user case.
-4. Less‑optimized hybrid‑attention path (it JIT‑compiled Triton kernels mid‑inference).
+### Quality vs Q6_K, and the regex reasoning‑loop finding (corrected by a controlled study)
+NVFP4's *code* is fine — it converges `eval` in 2 rounds, identical to Q6_K. But on the hardest task (a
+backtracking **regex matcher**), vLLM/NVFP4 falls into a **degenerate reasoning loop ~67% of the time**
+(measured, N=15 seeds): it re-emits "*Let me use a different approach…*" until it exhausts the budget
+(one capture: 127K chars, **91% repeated lines**, the same sentence ×121), never committing to code.
+A controlled study (`docs/precision-and-reasoning-loops.md`) pins the cause: it is **specific to the
+NVFP4 format + vLLM/Marlin decode — NOT bit-width and NOT context.** Plain 4-bit (Q4_K_M) and 6-bit
+(Q6_K) on **llama.cpp loop only ~1/5**, and KV precision (fp8 vs f16) is null. *(An earlier version of
+this note guessed it was "context rope, not NVFP4-specific" — the controls falsified that.)* So it's
+not "4-bit degrades reasoning"; it's this format+engine combination on SM120. **For single-stream
+reliability use llama.cpp Q4_K_M (`docs/optimized-config.md`); use vLLM/NVFP4 for concurrency**, with
+loop-detection + retry if it matters.
 
-**To go faster:** drop `--enforce-eager` / try `--cudagraph-mode PIECEWISE` (risks the SM120 crash),
-or **send concurrent requests** — vLLM's batching is where it beats llama.cpp.
+### Why CUDA graphs matter so much here (26 → 214 tok/s)
+At batch=1 every token otherwise pays full kernel‑launch overhead — exactly what CUDA graphs erase.
+FP4 tensor cores stay unused (Marlin = 16‑bit compute), and vLLM's batching shines with *concurrency*,
+not single streams — yet even single‑stream it now beats llama.cpp once graphs are on.
 
-**Caveats:** the chosen quant uses per‑layer (not shared) NVFP4 scales for q/k/v → vLLM warns of
-possible slight accuracy loss. And the verbose‑reasoner gotcha applies (tiny `max_tokens` → empty
-`content`; give it a few thousand).
-
-**Bottom line:** Path A works and is the right call for **concurrency / native tool‑parsing**. For
-**single‑stream coding, Path B (llama.cpp) is ~6× faster and simpler** — still the daily driver.
+**Bottom line:** Path A works and is the right call for **concurrency / native tool‑parsing**. But for
+**single‑stream daily use it's the wrong pick** — it loops ~67% on the hardest reasoning, and llama.cpp
+**Q4_K_M** is both faster (237 vs 214 tok/s) *and* far more reliable (loops ~1/5 full-trace vs vLLM's
+67%, though not loop-proof). Use vLLM when serving many parallel agents;
+otherwise see `docs/optimized-config.md`.
 
 ---
 

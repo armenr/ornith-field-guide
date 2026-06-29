@@ -8,8 +8,9 @@ Everything here was worked out empirically on one machine; the numbers and recip
 **measured, not guessed**. Same GPU (or close)? You should be able to reproduce all of it.
 
 > **The 30-second version:** run it at **temp 0.6–1.0** (never low), give it **`max_tokens` ≥ 32K**
-> (it's a *very* verbose reasoner), serve the 35B with **`--n-cpu-moe`** (not whole-layer offload),
-> and it's a genuinely capable, fully-local coding model that **self-corrects from compiler errors**.
+> (it's a *very* verbose reasoner), and serve the 35B as **Q4_K_M on llama.cpp, fully on the GPU**
+> (21 GB fits the 32 GB card with no CPU offload → ~237 tok/s, and 4-bit costs nothing measurable vs
+> Q6_K). It's a genuinely capable, fully-local coding model that **self-corrects from compiler errors**.
 > Most "it's broken" moments are config, not the model. Details below.
 
 *Captured 2026-06-28. Models: https://huggingface.co/deepreinforce-ai · MIT licensed.*
@@ -27,11 +28,11 @@ Tested on: **RTX 5090 (32 GB)** + AMD 9950X3D + 128 GB DDR5. It will transfer ne
 # 0. prereq: a CUDA-enabled llama.cpp `llama-server` (Blackwell/sm_120 -> CUDA >= 12.8). See below.
 export LLAMA_SERVER=/path/to/llama.cpp/build/bin/llama-server
 
-# 1. download the 35B (the daily driver) — resumable parallel downloader
-scripts/download.sh deepreinforce-ai/Ornith-1.0-35B-GGUF ornith-1.0-35b-Q6_K.gguf
+# 1. download the 35B in Q4_K_M (the optimized daily driver — fits FULLY on a 32GB card)
+scripts/download.sh deepreinforce-ai/Ornith-1.0-35B-GGUF ornith-1.0-35b-Q4_K_M.gguf
 
-# 2. serve it
-scripts/serve-35b.sh            # http://127.0.0.1:8095, ~151 tok/s
+# 2. serve it — fully on GPU, no CPU offload
+scripts/serve-q4.sh             # http://127.0.0.1:8095, ~237 tok/s
 
 # 3. verify
 scripts/smoke-test.sh 8095
@@ -39,6 +40,33 @@ scripts/smoke-test.sh 8095
 Then talk to it at `http://127.0.0.1:8095/v1/chat/completions` (OpenAI-compatible).
 **Run it at temperature 0.6–1.0, top_p 0.95, top_k 20.** That one thing is the difference between
 great output and infinite "I apologize for the repeated errors" loops — see `docs/settings.md`.
+
+## How to run it — and the optimized config
+Three real options, all measured. **For single-user coding the winner is Q4_K_M on llama.cpp, fully on
+the GPU** (`scripts/serve-q4.sh`) — fastest *and* quality-equivalent to the bigger quant:
+
+| | **Q4_K_M · llama.cpp** ⭐ | **Q6_K · llama.cpp** | **NVFP4 · vLLM (Docker)** |
+|---|---|---|---|
+| Speed (1 stream) | **~237 tok/s** | ~150 tok/s | 214–232 tok/s |
+| Fits fully on GPU? | **yes** (21 GB, no offload) | no (28.5 GB, needs `--n-cpu-moe`) | yes (21 GB) |
+| Reasoning-loop rate | low (~1/5 hardest) | low (~1/5 hardest) | **67%** on hardest tasks |
+| Quality | baseline (= Q6_K) | = Q4_K_M (a wash) | code OK, but loops single-stream |
+| Best for | **single-stream daily use** | max weight fidelity | **concurrency / many agents** |
+
+The short version: Q4_K_M fits fully on the card so it runs with **zero CPU offload** (the speed
+unlock), and the 4-bit-vs-6-bit quality difference is below what we could measure. The vLLM "reasoning
+loop" is an **NVFP4-format + vLLM-decode artifact, not a bit-width problem** — proven with clean
+controls. Full study: `docs/optimized-config.md` and `docs/precision-and-reasoning-loops.md`.
+
+**Concurrency path — vLLM/NVFP4 in one command** (Docker + nvidia-container-toolkit; ~21 GB in `$MODEL_DIR`):
+```bash
+export MODEL_DIR=$HOME/models/ornith-nvfp4   # model.safetensors + chat_template.jinja
+docker compose up -d                          # ~214 tok/s; great for many parallel agents
+scripts/smoke-vllm.sh
+```
+On vLLM the chain-of-thought is in `message.reasoning` (llama.cpp uses `message.reasoning_content`).
+Use it for serving a team / many concurrent requests; for single-stream reliability prefer Q4_K_M above.
+Details + the SM120/Marlin story: `docs/path-a-feasibility.md`.
 
 ## Prerequisites
 - **GPU driver + CUDA ≥ 12.8** (RTX 5090 is Blackwell / sm_120; older CUDA won't build kernels for it).
@@ -50,12 +78,14 @@ great output and infinite "I apologize for the repeated errors" loops — see `d
   SGLang ≥ 0.5.9 (needs NVFP4 weights to fit one 32 GB card; GGUF + llama.cpp is the practical route).
 
 ## Which model
-| Model | Q6_K size | speed (5090) | use it for |
-|---|---|---|---|
-| **35B MoE** | 28.5 GB | **151 tok/s** | **everything** — correct code, self-corrects from errors |
-| 9B Dense | 7.4 GB | ~130 tok/s | trivial code / drafts (verify the rest — it doesn't reliably converge) |
-| 397B MoE | 342 GB | n/a | won't fit a 32 GB card |
-Download the 9B too if you want the comparison: `scripts/download.sh deepreinforce-ai/Ornith-1.0-9B-GGUF ornith-1.0-9b-Q6_K.gguf`
+| Model | recommended quant | size | speed (5090) | use it for |
+|---|---|---|---|---|
+| **35B MoE** | **Q4_K_M** | 21 GB | **~237 tok/s** | **everything** — correct code, self-corrects; fits fully on GPU |
+| 9B Dense | Q6_K | 7.4 GB | ~130 tok/s | trivial code / drafts (verify the rest — it doesn't reliably converge) |
+| 397B MoE | — | 342 GB | n/a | won't fit a 32 GB card |
+The 35B in **Q4_K_M** is the optimized daily driver (`docs/optimized-config.md`). Q6_K (28.5 GB) is a
+max-fidelity fallback that needs `--n-cpu-moe` to fit; quality vs Q4_K_M is a wash. Download the 9B for
+comparison: `scripts/download.sh deepreinforce-ai/Ornith-1.0-9B-GGUF ornith-1.0-9b-Q6_K.gguf`
 
 ## Letting Claude Code use this
 **Option A — Claude Code as the *operator* (recommended, zero extra infra).**
@@ -80,33 +110,48 @@ this is best for offline/private work, not as a daily Claude replacement.
 ```
 CLAUDE.md                  # operational brain — Claude Code reads this automatically
 README.md                  # this file
+docker-compose.yml         # vLLM + NVFP4 in one command (concurrency path): `docker compose up -d`
 scripts/
   download.sh              # resumable parallel HF downloader (beats throttling/Xet)
-  serve-35b.sh             # serve 35B (llama.cpp): -ngl 99 --n-cpu-moe 6, the fast/fits config
+  serve-q4.sh              # ⭐ OPTIMIZED daily driver: Q4_K_M, -ngl 99 (no offload), -c 65536, ~237 tok/s
+  serve-35b.sh             # Q6_K (llama.cpp): -ngl 99 --n-cpu-moe 6 — max-fidelity fallback
   serve-9b.sh              # serve 9B fully on GPU
-  serve-vllm-nvfp4.sh      # Path A (verified): vLLM + NVFP4 in Docker — concurrency/native tool-calls
-  smoke-test.sh            # health + tok/s + reasoning-split check
+  serve-vllm-nvfp4.sh      # vLLM + NVFP4 in Docker (concurrency) — MODE=fast|stable, KV_DTYPE toggle
+  smoke-test.sh            # llama.cpp: health + tok/s + reasoning-split check
+  smoke-vllm.sh            # vLLM: answers + THINKS (reasoning field) + tok/s
   selffix_loop.py          # agentic compile→fix→retry harness (problems: eval, trie, regex)
+  loop-rate-sweep.py       # N-seed reasoning-loop rate + Wilson CI (the study harness)
+  loop-window-analysis.py  # prefix-16K vs full-trace uniqueness (catches gradual loops)
+  correctness-battery.py   # eval/trie self-fix convergence rate + rounds, across seeds
+  seed-sweep-regex.py      # quick per-seed uniqueness sweep vs any server
 docs/
+  optimized-config.md      # ⭐ the daily-driver recommendation + the data behind it
+  precision-and-reasoning-loops.md  # controlled study: why NVFP4-on-vLLM loops (it's not bit-width)
   settings.md              # sampling + runtime (temperature + output-budget lessons) — READ THIS
-  benchmarks.md            # measured tok/s, VRAM, sizes, self-correction results
+  benchmarks.md            # measured tok/s, VRAM, sizes, self-correction + the quant study
   observations.md          # model behavior, quality, "we never found its ceiling", unreleased-31B
   troubleshooting.md       # every wall we hit and the fix
-  serving-guide.md         # finalized two-path setup (llama.cpp + vLLM, tool-calling, agents)
+  serving-guide.md         # finalized setup (llama.cpp + vLLM, tool-calling, agents)
   path-a-feasibility.md    # how hard the vLLM/NVFP4 path actually is on a 5090 today
   35b-assessment.md        # the colleague-facing review of the 35B
 ```
 
-## The six things that took longest to learn (so you don't have to)
+## The seven things that took longest to learn (so you don't have to)
 1. **Temperature.** 0.6–1.0, never ~0.3. Cold = degenerate loops. (`docs/settings.md`)
 2. **Budget its thinking — `max_tokens` ≥ 32K.** It's an extremely verbose reasoner (~30K tokens on
    hard problems). Under-budget it and the code truncates and it *looks* broken. This fooled us into
    declaring a false "ceiling." (`docs/settings.md`, `docs/troubleshooting.md`)
-3. **MoE offload by *role*, not by layer.** `--n-cpu-moe 6` (experts→CPU, attention→GPU) = 151 tok/s
-   and fits around other GPU usage. Whole-layer `-ngl 34` = 50 tok/s. (`docs/troubleshooting.md`)
-4. **Context is cheap here.** Hybrid linear attention → 256K KV is only ~5 GB (measured). Don't let a
+3. **Quant = VRAM fit, not quality.** **Q4_K_M (21 GB) fits *fully* → `-ngl 99`, no `--n-cpu-moe` →
+   ~237 tok/s.** Q6_K (28.5 GB) doesn't fit, so it needs `--n-cpu-moe` (experts→CPU) and runs ~150 —
+   for the *same* quality. Never use whole-layer `-ngl 34` (~50 tok/s). (`docs/optimized-config.md`)
+4. **Context is cheap here.** Hybrid linear attention (full attention every 4th layer) keeps KV small —
+   256K context ≈ 5 GB of KV, and the Q4 daily driver at `-c 65536` fits in ~26 GB total. Don't let a
    generic "KV is expensive" guide scare you off long context. (`docs/benchmarks.md`)
 5. **Downloads:** parallel chunked curl; HF per-IP throttle + Xet stalls otherwise.
 6. **Size buys correctness, not polish — and we never found its ceiling.** Both models write pretty
    code; only the 35B is *right* and self-corrects. Every "failure" we saw was *our* config
    (temperature/budget/feedback), not the model. Verify the 9B. (`docs/benchmarks.md`, `docs/observations.md`)
+7. **The vLLM "reasoning loop" is an NVFP4+vLLM artifact — not 4-bit, not the model.** vLLM/NVFP4 loops
+   *sharply* ~67% on the hardest reasoning; plain 4-bit (Q4_K_M) on llama.cpp loops far less (~1/5
+   full-trace, and only gradually) — clean controls. Use llama.cpp for single-stream, vLLM for
+   concurrency. (`docs/precision-and-reasoning-loops.md`)

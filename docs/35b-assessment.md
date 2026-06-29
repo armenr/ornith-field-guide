@@ -2,11 +2,13 @@
 
 A short, evidence-based review of the **35B MoE** variant as a local coding model. Every result
 below was **compiled and behavior-tested** (Rust, `rustc 1.94`), not eyeballed. Run on a single
-RTX 5090 (Q6_K GGUF, ~151 tok/s) at the model's official sampling (temp 0.6, top_p 0.95, top_k 20).
+RTX 5090 (Q6_K GGUF here; **Q4_K_M is the faster, quality-equivalent serving choice** — see
+`docs/optimized-config.md`) at the model's official sampling (temp 0.6, top_p 0.95, top_k 20).
 
 ## What it is
 35B-parameter Mixture-of-Experts (256 experts, ~8 active → only **~2–3B params active per token**),
-so it runs at ~150 tok/s on one 5090 despite its size, and fits at Q6_K (28.5 GB). It's a
+so it runs fast on one 5090 despite its size (~150 tok/s at Q6_K; **~237 tok/s at Q4_K_M**, which fits
+fully on the card). It's a
 **reasoning model** (emits a `<think>` block, then the answer).
 
 ## Why these tasks

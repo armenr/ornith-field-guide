@@ -1,0 +1,61 @@
+# Path A — Ornith-1.0-35B (NVFP4) on vLLM, one command, zero host installs beyond Docker +
+# nvidia-container-toolkit. Verified 2026-06-28 on a single RTX 5090 (SM120).
+#
+#   export MODEL_DIR=$HOME/models/ornith-nvfp4   # where model.safetensors + chat_template.jinja live
+#   docker compose up -d
+#   scripts/smoke-vllm.sh                         # proves it answers + THINKS + reports tok/s
+#
+# Default is the FAST config (CUDA graphs, ~214 tok/s, verified stable on Marlin). If you ever hit a
+# CUDA-graph crash/hang during decode, append `--enforce-eager` to `command` (the STABLE fallback).
+#
+# Weights: get the NVFP4 repo (e.g. an Ornith-1.0-35B-NVFP4 export) into $MODEL_DIR. ~22 GB.
+services:
+  ornith-vllm:
+    image: vllm/vllm-openai:nightly
+    container_name: ornith-vllm
+    ipc: host
+    ports:
+      - "8000:8000"
+    volumes:
+      - "${MODEL_DIR:-${HOME}/models/ornith-nvfp4}:/model:ro"
+    environment:
+      # Offline (no HF calls) + FORCE MARLIN W4A16: native NVFP4-MoE kernels crash on SM120.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HOME: /tmp/hf
+      VLLM_USE_FLASHINFER_MOE_FP4: "0"
+      VLLM_NVFP4_GEMM_BACKEND: marlin
+      VLLM_MOE_FORCE_MARLIN: "1"
+      VLLM_TEST_FORCE_FP8_MARLIN: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - /model
+      - --served-model-name=Ornith-1.0-35B
+      - --trust-remote-code
+      - --language-model-only          # text-only; the vision tower is untested here
+      - --tensor-parallel-size=1
+      - --max-model-len=65536
+      - --max-num-seqs=1
+      - --gpu-memory-utilization=0.75   # leaves ~3 GB headroom for a desktop/compositor
+      - --kv-cache-dtype=fp8
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_xml
+      - --reasoning-parser=qwen3        # chain-of-thought is exposed in the `reasoning` field
+      - --chat-template=/model/chat_template.jinja
+      - --host=0.0.0.0
+      - --port=8000
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -35,6 +35,20 @@ scripts/smoke-test.sh 8095  # verify + show tok/s
   fits). Q6_K (28.5 GB) *doesn't* fit, so it needs `--n-cpu-moe 6` (experts→CPU, attention→GPU).
   **Never** use whole-layer `-ngl 34` (the ~50 tok/s trap).
 
+## Context window (big codebases)
+- **Native max is 256K (`n_ctx_train = 262144`) — the real ceiling.** Needle recall verified usable at
+  200K and 250K; fits at full f16 KV (~30.6 GB, KV only ~5 GB). `serve-q4.sh` defaults to `-c 262144
+  -np 1` (one request gets the full 256K).
+- **>256K does NOT work** — sectioned rope (`rope type 40`) rejects YaRN/linear extension; llama.cpp
+  caps the slot at 262144 regardless of `-c`. Don't promise 500K–1M. (`docs/context-window.md`)
+- One 5090's KV budget (~256K f16) is shared: `-np 1` = full 256K to one request; `-np N` splits it.
+  1M-orchestrator + big sub-agents at once is multi-GPU territory, not one card.
+
+## Code quality by language (Q4 vs Q6)
+Across Rust/Python/Go/TS, **Q4 ≈ Q6 (a wash)** — 4-bit costs nothing measurable. Python/Go/TS are
+near-perfect first-try; **Rust is the hard one** (borrow checker → more compile→fix rounds, either
+quant). (`docs/quant-by-language.md`)
+
 ## Serving (Path A — vLLM + NVFP4 in Docker; for concurrency / native tool-parsing)
 Zero host installs beyond Docker + nvidia-container-toolkit. **Verified on the 5090 (SM120).**
 ```bash

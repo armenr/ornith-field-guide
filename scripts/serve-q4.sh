@@ -13,12 +13,16 @@ set -u
 LLAMA="${LLAMA_SERVER:-llama-server}"
 MODEL="${ORNITH_35B_Q4:-$HOME/models/ornith/ornith-1.0-35b-Q4_K_M.gguf}"
 PORT="${PORT:-8095}"
-CTX="${CTX:-65536}"   # Q4 leaves KV headroom; drop to 49152/32768 if you OOM around a heavy desktop
+CTX="${CTX:-262144}"  # 256K = the model's NATIVE trained max (needle-verified usable; ~30.6 GB at f16 KV).
+                      # >256K does NOT work (sectioned rope rejects extension) — see docs/context-window.md.
+NP="${NP:-1}"         # -np 1: one request gets the FULL 256K (orchestrator/big-codebase). NP=4 to split
+                      # the KV pool across concurrent requests (each gets ~CTX/NP).
+KVQ="${KVQ:-}"        # set KVQ="--cache-type-k q8_0 --cache-type-v q8_0" for ~27 GB headroom at 256K
 
 # -ngl 99 with NO --n-cpu-moe: the whole model lives on the GPU. This is the speed unlock vs Q6_K.
 exec "$LLAMA" -m "$MODEL" \
   -ngl 99 \
-  -c "$CTX" -fa on \
+  -c "$CTX" -fa on -np "$NP" $KVQ \
   --host 127.0.0.1 --port "$PORT" \
   --jinja \
   --reasoning-format deepseek \

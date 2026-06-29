@@ -123,9 +123,13 @@ scripts/
   loop-rate-sweep.py       # N-seed reasoning-loop rate + Wilson CI (the study harness)
   loop-window-analysis.py  # prefix-16K vs full-trace uniqueness (catches gradual loops)
   correctness-battery.py   # eval/trie self-fix convergence rate + rounds, across seeds
+  multilang-battery.py     # Q4-vs-Q6 convergence across Rust/Python/Go/TS (real compile+test)
   seed-sweep-regex.py      # quick per-seed uniqueness sweep vs any server
+  needle-test.py           # long-context needle-in-haystack recall test
 docs/
   optimized-config.md      # ⭐ the daily-driver recommendation + the data behind it
+  context-window.md        # how much context is real (256K native; why >256K doesn't work)
+  quant-by-language.md     # Q4 vs Q6 across Rust/Python/Go/TS (a wash; Rust is hardest)
   precision-and-reasoning-loops.md  # controlled study: why NVFP4-on-vLLM loops (it's not bit-width)
   settings.md              # sampling + runtime (temperature + output-budget lessons) — READ THIS
   benchmarks.md            # measured tok/s, VRAM, sizes, self-correction + the quant study

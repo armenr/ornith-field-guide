@@ -32,14 +32,24 @@ not a guarantee. Still treat "the model can't do X" with suspicion (check temper
 first) — but know that on the very hardest problems there *is* an occasional commit-failure loop:
 detect it (low reasoning-uniqueness / `finish=length` with empty `content`) and retry with a new seed.
 
-**9B (dense) — capable-looking, frequently wrong.** It writes confident, well-decorated code
-(doc comments, `NonNull`, even unit tests) but on hard ownership problems it:
-- invents nonexistent std APIs (`LinkedList::move_back_to_front`, `.value()`),
-- misuses types (`NonNull` field access without `.as_ref()`), and
-- has logic bugs (e.g. a trie whose `search()` can't find an inserted word).
-It can *improve* with compiler feedback but oscillates and doesn't converge. Good for trivial code;
-verify everything on anything non-trivial. Practical pattern: extract the first ```rust block and
-discard its prose (its explanations hallucinate stdlib facts even when the code is fine).
+**9B (dense) — capable, but verify it; weaker than the 35B on hard problems.** *(Corrected
+2026-06-29 — see `docs/9b-assessment.md` for the full re-assessment.)* The earlier verdict here
+("capable-looking, frequently wrong, oscillates, doesn't converge") was formed with **broken
+methodology** — concurrent batched decode (`-np 4`, not batch-invariant) plus useless
+bare-`panic`/`assert` test feedback the model couldn't act on. Re-run **single-stream** with
+**actionable feedback** (failing input + expected + actual), the 9B:
+- **self-corrects the very trie test that originally condemned it** (3/3 across seeds), and nails the
+  expression evaluator and interval-merge; it's **strong in Python/Go/TS** (mostly first-try).
+- but still **fails the genuinely hard ownership/algorithmic problems** the 35B clears — e.g. Rust LRU
+  **0/3** vs 35B 3/3; it spirals on backtracking regex.
+- and writes **buggier code even when it "passes"**: in a blind, anonymized head-to-head, reviewers
+  preferred the 35B's code on **11/14** tasks, and adversarial break-testers found **more defects in
+  the 9B's (24 vs 16)** — including two solutions that passed our behavioral test but are
+  spec-violating (Rust `eval("2 * 3")`→error; Python `evaluate("7/(-2)")`→`-4` floor instead of `-3`
+  truncating). The 35B got both right.
+
+Net: a useful fast drafter (verify it; best in GC'd languages) — not the one to trust for correctness on
+hard problems. The extra params buy the 35B *correctness and convergence*, not just nicer-looking code.
 
 ## Behavior quirks
 - **Verbose reasoner (this trips people up).** It thinks for **~30,000 tokens** on hard problems

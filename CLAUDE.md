@@ -17,8 +17,9 @@ wasn't the model, it was the settings.
   work.** (`scripts/serve-q4.sh`; full study `docs/optimized-config.md`.)
 - **35B MoE Q6_K (28.5 GB):** max-fidelity fallback. Doesn't fit fully → needs `--n-cpu-moe` → ~150
   tok/s. Same correctness as Q4_K_M; only worth it if you specifically want maximum weight fidelity.
-- **9B Q6_K (7.4 GB):** fits fully, ~130 tok/s. Trivial code / drafts only; verify anything hard
-  (confident-but-wrong, doesn't reliably self-correct).
+- **9B Q6_K (7.4 GB):** fits fully, ~130 tok/s. Capable fast drafter (strong in Python/Go/TS, self-fixes
+  with *actionable* feedback) — **verify it**; trails the 35B on hard Rust (LRU 0/3) and writes buggier
+  "passing" code (blind head-to-head: 35B preferred 11/14). See `docs/9b-assessment.md`.
 - **397B:** won't fit; skip. The 31B Dense is **unreleased** — don't try to download it.
 
 ## Serving (llama.cpp — the daily-driver path)
@@ -99,8 +100,13 @@ behavioral test, and feeds `rustc` errors back over multiple rounds.
 ```bash
 python3 scripts/selffix_loop.py <port> <label> <max_iters> <problem>   # problems: eval | trie
 ```
-Use it to confirm a model actually solves a task. Empirically the 35B converges (often 1 fix round);
-the 9B oscillates and doesn't.
+Use it to confirm a model actually solves a task. **Give the harness *actionable* feedback** (the
+failing input + expected + actual, like `scripts/multilang-battery.py` / `scripts/capture-solutions.py`
+do) — a bare `panic`/`assert` makes the model spiral. **Run single-stream** (`-np 1`): concurrent
+batched decode isn't batch-invariant and corrupts per-seed results. Empirically the 35B converges
+(often 1 fix round); the 9B converges on most problems too but fails hard Rust (LRU) and spirals on
+regex — `docs/9b-assessment.md`. And convergence ⇏ correctness: keep an adversarial check (passing code
+can still be spec-wrong).
 
 ## Reflexes / gotchas (see docs/troubleshooting.md for all)
 - Low/idle GPU utilization during generation is **normal** for single-stream MoE decode (latency-bound).

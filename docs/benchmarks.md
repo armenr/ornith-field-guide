@@ -69,12 +69,20 @@ repeat. Identical settings for both models.
 > (`(ab)+`, `a*`, `.*z`) that the broken runs failed. **We never actually found the 35B's ceiling on
 > these tasks.**
 
+> **9B column superseded (2026-06-29).** The 9B results in the table above were produced with the
+> *same* broken methodology we later caught: concurrent batched decode (`-np 4`, not batch-invariant)
+> and bare-`panic` feedback the model couldn't localize. Re-run single-stream with actionable feedback,
+> the 9B **self-corrects the trie 3/3** (the "search() broken" cell above) and the evaluator, and is
+> strong in Python/Go/TS — but still fails **Rust LRU 0/3** and writes buggier code than the 35B in a
+> blind head-to-head (35B preferred on **11/14**). Full corrected numbers: **`docs/9b-assessment.md`**.
+
 **Takeaway:** the 35B genuinely reasons about compiler feedback and converges — but *only if you
 don't starve it*. Give it the right temperature (0.6–1.0), enough output budget (≥32K tokens), and
-actionable feedback. Under those conditions it self-corrects hard problems to passing. The 9B, by
-contrast, improves locally but oscillates/regresses and can't land — a feedback loop *amplifies*
-capability, it doesn't create it. Trust the 35B in agentic/iterative loops; treat the 9B's output as
-a draft to verify.
+actionable feedback. Under those conditions it self-corrects hard problems to passing. The 9B, under
+the *same* corrected conditions, is more capable than first reported (it self-corrects the trie and the
+evaluator, and is strong in GC'd languages) but still trails the 35B on hard ownership/algorithmic
+problems and on code correctness — a feedback loop *amplifies* capability, it doesn't create it. Trust
+the 35B in agentic/iterative loops; treat the 9B's output as a draft to verify (`docs/9b-assessment.md`).
 
 > **Note (2026-06-29 study):** the regex "converged in 3" was a *single lucky draw*, not a reliable
 > property — regex convergence is stochastic (the model can stay verbose and fail to commit ~1/5 of

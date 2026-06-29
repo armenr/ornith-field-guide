@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-# Multi-language Q4-vs-Q6 correctness battery. Same 3 algorithmic problems in Rust/Python/Go/TS,
-# each with a real compile+behavioral-test harness and a self-fix loop. Reports per (lang,problem)
-# convergence rate, avg rounds, and first-attempt pass, across seeds.
-# Args: PORT MODELNAME LABEL "rust,python,go,ts" "1,2,3" [MAXIT]
+# Multi-language correctness battery. Same 3 algorithmic problems in Rust/Python/Go/TS, each with a real
+# compile+behavioral-test harness and a self-fix loop. Reports per (lang,problem) convergence rate, avg
+# rounds, and first-attempt pass, across seeds.
+#
+# IMPORTANT (2026-06-29 methodology fix): the test harnesses give ACTIONABLE feedback on failure — the
+# first failing input + expected + actual (what a real test runner shows) — not a bare panic/assert.
+# A model can only self-correct a logic bug it can localize; bare "assertion failed" feedback made the
+# model spiral/give-up and badly understated its self-fix ability. Also: run this SINGLE-STREAM (server
+# `-np 1`), because concurrent batched decode in llama.cpp is not batch-invariant (a sequence's logits
+# depend on its batch neighbors), which makes per-seed results non-reproducible at temp 0.6.
+#
+# Args: PORT MODELNAME LABEL "rust,python,go,ts" "1,2,3" [MAXIT]   Env: MAXTOK (default 20000)
 import json, re, subprocess, sys, os, urllib.request, tempfile, shutil
 PORT, MODEL, LABEL = sys.argv[1], sys.argv[2], sys.argv[3]
 LANGS = sys.argv[4].split(","); SEEDS = [int(s) for s in sys.argv[5].split(",")]
@@ -52,7 +60,8 @@ PROBLEMS = {
  },
 }
 
-# --- per-language test harnesses (appended to model code) + how to build/run + success sentinel ---
+# --- per-language test harnesses (appended to model code). On failure they print ONE actionable line
+#     "FAIL: <call> = <actual> but expected <expected>" to stdout; on success they print ALL_PASS_OK. ---
 OK = "ALL_PASS_OK"
 LANG = {
  "rust": {
@@ -60,25 +69,42 @@ LANG = {
    "tests": {
      "eval": f'''
 fn main() {{
-    assert_eq!(eval("2+3*4"), Ok(14)); assert_eq!(eval("(2+3)*4"), Ok(20));
-    assert_eq!(eval("10/2-3"), Ok(2)); assert_eq!(eval(" -(3 + 4) "), Ok(-7));
-    assert_eq!(eval("2*-3"), Ok(-6)); assert_eq!(eval("7-2-2"), Ok(3));
-    assert!(eval("1/0").is_err()); assert!(eval("2 3").is_err()); assert!(eval("(1+2").is_err()); assert!(eval("").is_err());
+    let cases: Vec<(&str, Result<i64,()>)> = vec![("2+3*4",Ok(14)),("(2+3)*4",Ok(20)),("10/2-3",Ok(2)),(" -(3 + 4) ",Ok(-7)),("2*-3",Ok(-6)),("7-2-2",Ok(3)),("1/0",Err(())),("2 3",Err(())),("(1+2",Err(())),("",Err(()))];
+    for (input, want) in cases {{
+        let got = eval(input);
+        match (&want, &got) {{
+            (Ok(w), Ok(g)) if g == w => {{}},
+            (Err(()), Err(_)) => {{}},
+            (Ok(w), _) => {{ println!("FAIL: eval({{:?}}) = {{:?}} but expected Ok({{}})", input, got, w); return; }},
+            (Err(()), Ok(g)) => {{ println!("FAIL: eval({{:?}}) = Ok({{}}) but expected an Err (malformed input / div-by-zero)", input, g); return; }},
+        }}
+    }}
     println!("{OK}");
 }}''',
      "lru": f'''
 fn main() {{
     let mut c = LruCache::new(2);
-    c.put(1,1); c.put(2,2); assert_eq!(c.get(1), Some(1));
-    c.put(3,3); assert_eq!(c.get(2), None); c.put(4,4); assert_eq!(c.get(1), None);
-    assert_eq!(c.get(3), Some(3)); assert_eq!(c.get(4), Some(4));
+    c.put(1,1); c.put(2,2);
+    let g = c.get(1); if g != Some(1) {{ println!("FAIL: after put(1,1),put(2,2): get(1) = {{:?}} but expected Some(1)", g); return; }}
+    c.put(3,3);
+    let g = c.get(2); if g != None {{ println!("FAIL: after put(3,3) over capacity 2: get(2) = {{:?}} but expected None (2 is LRU, should be evicted)", g); return; }}
+    c.put(4,4);
+    let g = c.get(1); if g != None {{ println!("FAIL: after put(4,4): get(1) = {{:?}} but expected None (1 should be evicted)", g); return; }}
+    let g = c.get(3); if g != Some(3) {{ println!("FAIL: get(3) = {{:?}} but expected Some(3)", g); return; }}
+    let g = c.get(4); if g != Some(4) {{ println!("FAIL: get(4) = {{:?}} but expected Some(4)", g); return; }}
     println!("{OK}");
 }}''',
      "intervals": f'''
 fn main() {{
-    assert_eq!(merge(vec![(1,3),(2,6),(8,10),(15,18)]), vec![(1,6),(8,10),(15,18)]);
-    assert_eq!(merge(vec![(1,4),(4,5)]), vec![(1,5)]);
-    assert_eq!(merge(vec![(5,6),(1,3),(2,4)]), vec![(1,4),(5,6)]);
+    let cases: Vec<(Vec<(i64,i64)>, Vec<(i64,i64)>)> = vec![
+        (vec![(1,3),(2,6),(8,10),(15,18)], vec![(1,6),(8,10),(15,18)]),
+        (vec![(1,4),(4,5)], vec![(1,5)]),
+        (vec![(5,6),(1,3),(2,4)], vec![(1,4),(5,6)]),
+    ];
+    for (input, want) in cases {{
+        let got = merge(input.clone());
+        if got != want {{ println!("FAIL: merge({{:?}}) = {{:?}} but expected {{:?}}", input, got, want); return; }}
+    }}
     println!("{OK}");
 }}''',
    },
@@ -90,23 +116,44 @@ fn main() {{
    "tests": {
      "eval": f'''
 if __name__ == "__main__":
-    assert evaluate("2+3*4")==14; assert evaluate("(2+3)*4")==20; assert evaluate("10/2-3")==2
-    assert evaluate(" -(3 + 4) ")==-7; assert evaluate("2*-3")==-6; assert evaluate("7-2-2")==3
+    cases = [("2+3*4",14),("(2+3)*4",20),("10/2-3",2),(" -(3 + 4) ",-7),("2*-3",-6),("7-2-2",3)]
+    for inp,want in cases:
+        try: got = evaluate(inp)
+        except Exception as e:
+            print(f"FAIL: evaluate({{inp!r}}) raised {{type(e).__name__}}: {{e}} but expected {{want}}"); raise SystemExit
+        if got != want:
+            print(f"FAIL: evaluate({{inp!r}}) = {{got!r}} but expected {{want}}"); raise SystemExit
     for bad in ["1/0","2 3","(1+2",""]:
-        try: evaluate(bad); raise SystemExit("expected error for "+repr(bad))
+        try:
+            r = evaluate(bad); print(f"FAIL: evaluate({{bad!r}}) = {{r!r}} but expected a ValueError"); raise SystemExit
         except ValueError: pass
+        except SystemExit: raise
+        except Exception as e:
+            print(f"FAIL: evaluate({{bad!r}}) raised {{type(e).__name__}} but expected a ValueError"); raise SystemExit
     print("{OK}")''',
      "lru": f'''
 if __name__ == "__main__":
-    c = LruCache(2); c.put(1,1); c.put(2,2); assert c.get(1)==1
-    c.put(3,3); assert c.get(2)==-1; c.put(4,4); assert c.get(1)==-1
-    assert c.get(3)==3; assert c.get(4)==4
+    c = LruCache(2); c.put(1,1); c.put(2,2)
+    g = c.get(1)
+    if g != 1: print(f"FAIL: after put(1,1),put(2,2): get(1) = {{g!r}} but expected 1"); raise SystemExit
+    c.put(3,3)
+    g = c.get(2)
+    if g != -1: print(f"FAIL: after put(3,3) over capacity 2: get(2) = {{g!r}} but expected -1 (2 is LRU, evicted)"); raise SystemExit
+    c.put(4,4)
+    g = c.get(1)
+    if g != -1: print(f"FAIL: after put(4,4): get(1) = {{g!r}} but expected -1 (1 evicted)"); raise SystemExit
+    g = c.get(3)
+    if g != 3: print(f"FAIL: get(3) = {{g!r}} but expected 3"); raise SystemExit
+    g = c.get(4)
+    if g != 4: print(f"FAIL: get(4) = {{g!r}} but expected 4"); raise SystemExit
     print("{OK}")''',
      "intervals": f'''
 if __name__ == "__main__":
-    assert merge([(1,3),(2,6),(8,10),(15,18)])==[(1,6),(8,10),(15,18)]
-    assert merge([(1,4),(4,5)])==[(1,5)]
-    assert merge([(5,6),(1,3),(2,4)])==[(1,4),(5,6)]
+    cases = [([(1,3),(2,6),(8,10),(15,18)],[(1,6),(8,10),(15,18)]),([(1,4),(4,5)],[(1,5)]),([(5,6),(1,3),(2,4)],[(1,4),(5,6)])]
+    for inp,want in cases:
+        got = merge(list(inp))
+        if got != want:
+            print(f"FAIL: merge({{inp!r}}) = {{got!r}} but expected {{want!r}}"); raise SystemExit
     print("{OK}")''',
    },
    "build": None,
@@ -117,63 +164,88 @@ if __name__ == "__main__":
    "tests": {
      "eval": f'''
 func main() {{
-    chk := func(g int, e int, err error) {{ if err != nil || g != e {{ panic("eval mismatch") }} }}
-    g,err := Eval("2+3*4"); chk(g,14,err)
-    g,err = Eval("(2+3)*4"); chk(g,20,err)
-    g,err = Eval("10/2-3"); chk(g,2,err)
-    g,err = Eval(" -(3 + 4) "); chk(g,-7,err)
-    g,err = Eval("2*-3"); chk(g,-6,err)
-    for _, bad := range []string{{"1/0","2 3","(1+2",""}} {{ if _,e := Eval(bad); e == nil {{ panic("expected error") }} }}
+    type C struct {{ in string; want int; wantErr bool }}
+    cases := []C{{{{"2+3*4",14,false}},{{"(2+3)*4",20,false}},{{"10/2-3",2,false}},{{" -(3 + 4) ",-7,false}},{{"2*-3",-6,false}},{{"7-2-2",3,false}},{{"1/0",0,true}},{{"2 3",0,true}},{{"(1+2",0,true}},{{"",0,true}}}}
+    for _, c := range cases {{
+        g, err := Eval(c.in)
+        if c.wantErr {{
+            if err == nil {{ fmt.Printf("FAIL: Eval(%q) returned (%d, nil) but an error was expected\\n", c.in, g); return }}
+        }} else {{
+            if err != nil {{ fmt.Printf("FAIL: Eval(%q) returned error %v but expected %d\\n", c.in, err, c.want); return }}
+            if g != c.want {{ fmt.Printf("FAIL: Eval(%q) = %d but expected %d\\n", c.in, g, c.want); return }}
+        }}
+    }}
     fmt.Println("{OK}")
 }}''',
      "lru": f'''
 func main() {{
     c := NewLruCache(2)
     c.Put(1,1); c.Put(2,2)
-    if v,ok := c.Get(1); !ok || v != 1 {{ panic("g1") }}
+    if v,ok := c.Get(1); !ok || v != 1 {{ fmt.Printf("FAIL: after Put(1,1),Put(2,2): Get(1) = (%d,%v) but expected (1,true)\\n", v, ok); return }}
     c.Put(3,3)
-    if _,ok := c.Get(2); ok {{ panic("g2 should miss") }}
+    if v,ok := c.Get(2); ok {{ fmt.Printf("FAIL: after Put(3,3) over capacity 2: Get(2) = (%d,true) but expected a miss (false); 2 is LRU and should be evicted\\n", v); return }}
     c.Put(4,4)
-    if _,ok := c.Get(1); ok {{ panic("g1 should miss") }}
-    if v,ok := c.Get(3); !ok || v != 3 {{ panic("g3") }}
-    if v,ok := c.Get(4); !ok || v != 4 {{ panic("g4") }}
+    if v,ok := c.Get(1); ok {{ fmt.Printf("FAIL: after Put(4,4): Get(1) = (%d,true) but expected a miss; 1 should be evicted\\n", v); return }}
+    if v,ok := c.Get(3); !ok || v != 3 {{ fmt.Printf("FAIL: Get(3) = (%d,%v) but expected (3,true)\\n", v, ok); return }}
+    if v,ok := c.Get(4); !ok || v != 4 {{ fmt.Printf("FAIL: Get(4) = (%d,%v) but expected (4,true)\\n", v, ok); return }}
     fmt.Println("{OK}")
 }}''',
      "intervals": f'''
 func main() {{
     eq := func(a,b [][2]int) bool {{ if len(a)!=len(b) {{return false}}; for i := range a {{ if a[i]!=b[i] {{return false}} }}; return true }}
-    if !eq(Merge([][2]int{{{{1,3}},{{2,6}},{{8,10}},{{15,18}}}}), [][2]int{{{{1,6}},{{8,10}},{{15,18}}}}) {{ panic("m1") }}
-    if !eq(Merge([][2]int{{{{1,4}},{{4,5}}}}), [][2]int{{{{1,5}}}}) {{ panic("m2") }}
-    if !eq(Merge([][2]int{{{{5,6}},{{1,3}},{{2,4}}}}), [][2]int{{{{1,4}},{{5,6}}}}) {{ panic("m3") }}
+    type C struct {{ in, want [][2]int }}
+    cases := []C{{
+        {{[][2]int{{{{1,3}},{{2,6}},{{8,10}},{{15,18}}}}, [][2]int{{{{1,6}},{{8,10}},{{15,18}}}}}},
+        {{[][2]int{{{{1,4}},{{4,5}}}}, [][2]int{{{{1,5}}}}}},
+        {{[][2]int{{{{5,6}},{{1,3}},{{2,4}}}}, [][2]int{{{{1,4}},{{5,6}}}}}},
+    }}
+    for _, c := range cases {{
+        got := Merge(c.in)
+        if !eq(got, c.want) {{ fmt.Printf("FAIL: Merge(%v) = %v but expected %v\\n", c.in, got, c.want); return }}
+    }}
     fmt.Println("{OK}")
 }}''',
    },
    "build": None,
    "run": lambda f: ["go", "run", f],
-   "preamble": 'package main\nimport "fmt"\n',  # ensure imports; model code goes after
+   "preamble": 'package main\nimport "fmt"\n',
  },
  "ts": {
    "tag": "typescript", "ext": "ts",
    "tests": {
      "eval": f'''
-function ck(c:boolean){{ if(!c) throw new Error("fail"); }}
-ck(evaluate("2+3*4")===14); ck(evaluate("(2+3)*4")===20); ck(evaluate("10/2-3")===2);
-ck(evaluate(" -(3 + 4) ")===-7); ck(evaluate("2*-3")===-6); ck(evaluate("7-2-2")===3);
-for(const bad of ["1/0","2 3","(1+2",""]){{ let threw=false; try{{evaluate(bad);}}catch{{threw=true;}} ck(threw); }}
-console.log("{OK}");''',
+{{
+const ec:[string,number][]=[["2+3*4",14],["(2+3)*4",20],["10/2-3",2],[" -(3 + 4) ",-7],["2*-3",-6],["7-2-2",3]];
+for(const [inp,want] of ec){{
+  let got:number; try{{got=evaluate(inp);}}catch(e){{console.log(`FAIL: evaluate(${{JSON.stringify(inp)}}) threw ${{e}} but expected ${{want}}`);process.exit(0);}}
+  if(got!==want){{console.log(`FAIL: evaluate(${{JSON.stringify(inp)}}) = ${{got}} but expected ${{want}}`);process.exit(0);}}
+}}
+for(const bad of ["1/0","2 3","(1+2",""]){{ let threw=false; try{{evaluate(bad);}}catch{{threw=true;}} if(!threw){{console.log(`FAIL: evaluate(${{JSON.stringify(bad)}}) did not throw but expected an Error (malformed input / div-by-zero)`);process.exit(0);}} }}
+console.log("{OK}");
+}}''',
      "lru": f'''
-function ck(c:boolean){{ if(!c) throw new Error("fail"); }}
-const c=new LruCache(2); c.put(1,1); c.put(2,2); ck(c.get(1)===1);
-c.put(3,3); ck(c.get(2)===-1); c.put(4,4); ck(c.get(1)===-1);
-ck(c.get(3)===3); ck(c.get(4)===4);
-console.log("{OK}");''',
+{{
+const c=new LruCache(2); c.put(1,1); c.put(2,2);
+let g=c.get(1); if(g!==1){{console.log(`FAIL: after put(1,1),put(2,2): get(1) = ${{g}} but expected 1`);process.exit(0);}}
+c.put(3,3);
+g=c.get(2); if(g!==-1){{console.log(`FAIL: after put(3,3) over capacity 2: get(2) = ${{g}} but expected -1 (2 is LRU, evicted)`);process.exit(0);}}
+c.put(4,4);
+g=c.get(1); if(g!==-1){{console.log(`FAIL: after put(4,4): get(1) = ${{g}} but expected -1 (1 evicted)`);process.exit(0);}}
+g=c.get(3); if(g!==3){{console.log(`FAIL: get(3) = ${{g}} but expected 3`);process.exit(0);}}
+g=c.get(4); if(g!==4){{console.log(`FAIL: get(4) = ${{g}} but expected 4`);process.exit(0);}}
+console.log("{OK}");
+}}''',
      "intervals": f'''
-function ck(c:boolean){{ if(!c) throw new Error("fail"); }}
-function eq(a:[number,number][],b:[number,number][]){{ return JSON.stringify(a)===JSON.stringify(b); }}
-ck(eq(merge([[1,3],[2,6],[8,10],[15,18]]),[[1,6],[8,10],[15,18]]));
-ck(eq(merge([[1,4],[4,5]]),[[1,5]]));
-ck(eq(merge([[5,6],[1,3],[2,4]]),[[1,4],[5,6]]));
-console.log("{OK}");''',
+{{
+const eqi=(a:[number,number][],b:[number,number][])=>JSON.stringify(a)===JSON.stringify(b);
+const ci:[[number,number][],[number,number][]][]=[
+ [[[1,3],[2,6],[8,10],[15,18]],[[1,6],[8,10],[15,18]]],
+ [[[1,4],[4,5]],[[1,5]]],
+ [[[5,6],[1,3],[2,4]],[[1,4],[5,6]]],
+];
+for(const [inp,want] of ci){{ const got=merge(inp); if(!eqi(got,want)){{console.log(`FAIL: merge(${{JSON.stringify(inp)}}) = ${{JSON.stringify(got)}} but expected ${{JSON.stringify(want)}}`);process.exit(0);}} }}
+console.log("{OK}");
+}}''',
    },
    "build": None,
    "run": lambda f: ["bun", "run", f],
@@ -185,7 +257,7 @@ def chat(msgs, seed):
                        "top_k": 20, "min_p": 0, "seed": seed, "max_tokens": MAXTOK}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/chat/completions", body, {"Content-Type": "application/json"})
     try:
-        ch = json.load(urllib.request.urlopen(req, timeout=1200))["choices"][0]
+        ch = json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]
         return ch["message"].get("content") or "", ch.get("finish_reason")
     except Exception as e:
         return "", f"error:{str(e)[:80]}"
@@ -193,6 +265,12 @@ def chat(msgs, seed):
 def extract(t, tag):
     b = re.findall(r"```(?:" + tag + r"|[a-z]*)?\s*\n(.*?)```", t, re.S)
     return max(b, key=len) if b else t
+
+def feedback(stdout, stderr):
+    for l in stdout.splitlines():
+        if l.startswith("FAIL:"):
+            return l.strip()
+    return (stderr[:2500].strip() or f"no test output; stdout tail: {stdout[-400:]!r}")
 
 def run_lang(lang, prob, seed):
     spec = LANG[lang]; P = PROBLEMS[prob]
@@ -204,7 +282,14 @@ def run_lang(lang, prob, seed):
     first_pass = None
     for it in range(1, MAXIT + 1):
         content, finish = chat(msgs, seed)
-        if not content.strip():  # length-exhausted, server error, or empty -> fail this cell gracefully
+        if not content.strip():
+            # no code (reasoning ran the whole budget, or server error): nudge once and retry rather
+            # than scoring it a quality failure — but bounded by MAXIT.
+            if it < MAXIT:
+                msgs.append({"role": "assistant", "content": "(ran out of token budget while reasoning)"})
+                msgs.append({"role": "user", "content": "You produced no code (the reasoning ran long). Reason more "
+                             "concisely, then output the COMPLETE program in one ```" + spec['tag'] + " code block."})
+                continue
             return (False, it, (finish or "empty"), first_pass if first_pass is not None else False)
         code = extract(content, spec['tag'])
         ok = False; err = ""
@@ -215,7 +300,7 @@ def run_lang(lang, prob, seed):
                 open(f1, "w").write(code)
                 open(f2, "w").write('package main\nimport "fmt"\n' + spec["tests"][prob])
                 r = subprocess.run(["go", "run", f1, f2], capture_output=True, text=True, timeout=120)
-                ok = OK in r.stdout; err = "" if ok else (r.stderr[:2500] or f"no OK; stdout={r.stdout[-400:]!r}")
+                ok = OK in r.stdout; err = "" if ok else feedback(r.stdout, r.stderr)
             else:
                 src = code + "\n" + spec["tests"][prob]
                 f = os.path.join(WORK, f"{lang}_{prob}_{seed}_{it}.{spec['ext']}")
@@ -223,15 +308,16 @@ def run_lang(lang, prob, seed):
                 if spec["build"]:
                     b = os.path.join(WORK, "bin")
                     c = subprocess.run(spec["build"](f, b), capture_output=True, text=True, timeout=120)
-                    if c.returncode != 0: err = c.stderr[:2500]
+                    if c.returncode != 0:
+                        err = c.stderr[:2500]
                     else:
                         r = subprocess.run(spec["run"](b), capture_output=True, text=True, timeout=30)
-                        ok = OK in r.stdout; err = "" if ok else f"runtime: stdout={r.stdout[-400:]!r} stderr={r.stderr[-600:]!r}"
+                        ok = OK in r.stdout; err = "" if ok else feedback(r.stdout, r.stderr)
                 else:
                     r = subprocess.run(spec["run"](f), capture_output=True, text=True, timeout=60)
-                    ok = OK in r.stdout; err = "" if ok else (r.stderr[:2500] or f"no OK; stdout={r.stdout[-400:]!r}")
+                    ok = OK in r.stdout; err = "" if ok else feedback(r.stdout, r.stderr)
         except subprocess.TimeoutExpired:
-            err = "timeout (likely infinite loop)"
+            err = "the program ran past the timeout — likely an infinite loop."
         if first_pass is None: first_pass = ok
         if ok:
             return (True, it, "pass", first_pass)
@@ -239,7 +325,7 @@ def run_lang(lang, prob, seed):
         msgs.append({"role": "user", "content": f"Your {spec['tag']} solution failed.\n{err}\nReason about the root cause and return the COMPLETE corrected program in one ```{spec['tag']} block."})
     return (False, MAXIT, "no-converge", first_pass if first_pass is not None else False)
 
-print(f"=== Battery {LABEL}: langs={LANGS} probs={list(PROBLEMS)} seeds={SEEDS} ===")
+print(f"=== Battery {LABEL}: langs={LANGS} probs={list(PROBLEMS)} seeds={SEEDS} MAXTOK={MAXTOK} (rich-feedback) ===")
 summary = {}
 for lang in LANGS:
     for prob in PROBLEMS:

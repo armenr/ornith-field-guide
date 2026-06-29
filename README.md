@@ -81,7 +81,7 @@ Details + the SM120/Marlin story: `docs/path-a-feasibility.md`.
 | Model | recommended quant | size | speed (5090) | use it for |
 |---|---|---|---|---|
 | **35B MoE** | **Q4_K_M** | 21 GB | **~237 tok/s** | **everything** — correct code, self-corrects; fits fully on GPU |
-| 9B Dense | Q6_K | 7.4 GB | ~130 tok/s | trivial code / drafts (verify the rest — it doesn't reliably converge) |
+| 9B Dense | Q6_K | 7.4 GB | ~130 tok/s | fast drafts, esp. Python/Go/TS — **verify it**; trails the 35B on hard Rust + code correctness ([`docs/9b-assessment.md`](docs/9b-assessment.md)) |
 | 397B MoE | — | 342 GB | n/a | won't fit a 32 GB card |
 
 The 35B in **Q4_K_M** is the optimized daily driver (`docs/optimized-config.md`). Q6_K (28.5 GB) is a
@@ -157,9 +157,12 @@ docs/
    256K context ≈ 5 GB of KV, and the Q4 daily driver at `-c 65536` fits in ~26 GB total. Don't let a
    generic "KV is expensive" guide scare you off long context. (`docs/benchmarks.md`)
 5. **Downloads:** parallel chunked curl; HF per-IP throttle + Xet stalls otherwise.
-6. **Size buys correctness, not polish — and we never found its ceiling.** Both models write pretty
-   code; only the 35B is *right* and self-corrects. Every "failure" we saw was *our* config
-   (temperature/budget/feedback), not the model. Verify the 9B. (`docs/benchmarks.md`, `docs/observations.md`)
+6. **Size buys correctness, not polish.** Both models write pretty code; in a **blind, anonymized**
+   head-to-head reviewers preferred the 35B's on **11/14** tasks and found *more* latent bugs in the
+   9B's (two of which passed our behavioral tests yet violate the spec). Many of our *own* "the 9B
+   can't converge" findings were also config bugs (concurrent batching + useless test feedback), not
+   the model — fixed, the 9B is a capable fast drafter (best in Python/Go/TS) that still trails on hard
+   Rust. Verify the 9B. (`docs/9b-assessment.md`, `docs/benchmarks.md`, `docs/observations.md`)
 7. **The vLLM "reasoning loop" is an NVFP4+vLLM artifact — not 4-bit, not the model.** vLLM/NVFP4 loops
    *sharply* ~67% on the hardest reasoning; plain 4-bit (Q4_K_M) on llama.cpp loops far less (~1/5
    full-trace, and only gradually) — clean controls. Use llama.cpp for single-stream, vLLM for

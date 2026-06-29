@@ -56,10 +56,14 @@ compiler errors?). The second mode matters more: real coding is iterative agains
   it the way it was tuned; see `settings.md`.)
 - Minor: occasional imprecise stdlib asides in prose (e.g. mischaracterizing `Vec::sort` internals).
 
-**For context:** the same family's **9B** could *not* converge on these tasks — it improved with
-feedback but oscillated and shipped broken code (e.g., a trie whose `search()` couldn't find an
-inserted word). So this performance is specific to the 35B; the extra parameters buy *correctness
-and convergence*, not just nicer-looking code.
+**For context:** the same family's **9B**, re-tested under identical corrected conditions
+(`docs/9b-assessment.md`), is more capable than first reported — it self-corrects the trie and
+evaluator and is strong in Python/Go/TS — but still **trails the 35B where it counts**: it fails Rust
+LRU (0/3 vs 3/3) and, in a **blind anonymized head-to-head**, reviewers preferred the 35B's code on
+**11 of 14** tasks while break-testers found *more* defects in the 9B's (24 vs 16), including two
+"passing" 9B solutions that are provably spec-violating where the 35B's are correct. So this
+performance is specific to the 35B; the extra parameters buy *correctness and convergence*, not just
+nicer-looking code — now confirmed by blind review, not just our own eyes.
 
 ## Correction worth reading (we got this wrong first)
 The regex engine *initially* looked like the model's ceiling — it appeared to plateau at ~20 compile
@@ -70,11 +74,14 @@ errors and oscillate without converging. **That conclusion was wrong, and the ca
   built-in `matches!` macro) produced compiler errors that pointed at *test* code the model couldn't
   edit — feedback it literally couldn't act on.
 
-Fix the budget (≥32K tokens) and the feedback, and it **converges in 3 rounds** and passes everything.
-**Net: across all our tasks we never actually found a hard problem the 35B couldn't self-correct to
-passing — every "failure" was something *we* did wrong (temperature, output budget, or feedback
-quality).** Take any "the model can't do X" claim (including our earlier ones) with skepticism until
-those three are verified.
+Fix the budget (≥32K tokens) and the feedback, and it **converges in 3 rounds** here. **Net: *most*
+apparent failures were something *we* did wrong (temperature, output budget, or feedback quality) — take
+any "the model can't do X" claim, including our earlier ones, with skepticism until those three are
+verified.** But there *is* one genuine, config-independent limit: on the hardest, most open-ended
+problems the 35B sometimes **fails to commit** at a reasoning fork and loops until it exhausts the
+budget — ~1/5 of runs on any llama.cpp k-quant (`docs/observations.md`, `docs/precision-and-reasoning-loops.md`).
+A later 3-seed re-test put **regex at 1/3** (the "converged in 3 rounds" above was a lucky single draw),
+so this was not a hard problem the 35B reliably clears — detect the loop and retry with a new seed.
 
 ## Bottom line
 A trustworthy local coding model for a single 32 GB GPU **when used in a loop** with a compiler/tests

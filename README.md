@@ -83,6 +83,7 @@ Details + the SM120/Marlin story: `docs/path-a-feasibility.md`.
 | **35B MoE** | **Q4_K_M** | 21 GB | **~237 tok/s** | **everything** — correct code, self-corrects; fits fully on GPU |
 | 9B Dense | Q6_K | 7.4 GB | ~130 tok/s | trivial code / drafts (verify the rest — it doesn't reliably converge) |
 | 397B MoE | — | 342 GB | n/a | won't fit a 32 GB card |
+
 The 35B in **Q4_K_M** is the optimized daily driver (`docs/optimized-config.md`). Q6_K (28.5 GB) is a
 max-fidelity fallback that needs `--n-cpu-moe` to fit; quality vs Q4_K_M is a wash. Download the 9B for
 comparison: `scripts/download.sh deepreinforce-ai/Ornith-1.0-9B-GGUF ornith-1.0-9b-Q6_K.gguf`

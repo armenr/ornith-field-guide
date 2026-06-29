@@ -15,7 +15,7 @@ bandwidth (and the recommended Q4_K_M path uses no offload at all).
 | 35B Q6_K, `-ngl 99` (full GPU, *truly empty* card) | ~144 | only fits fully with NO desktop using VRAM; with a ~3 GB desktop it doesn't fit → use `--n-cpu-moe` |
 | 35B Q6_K, `-ngl 34` (whole-layer offload) | ~50 | ❌ avoid — drops attention to CPU |
 | 9B Q6_K, `-ngl 99` (full GPU) | ~130–134 | fits in ~9.5 GB |
-| vLLM NVFP4 (Marlin, CUDA graphs) | 214 / 232 (fp8 / f16 KV) | concurrency path; but 67% single-stream reasoning loop |
+| vLLM NVFP4 (Marlin, CUDA graphs) | 214 / 232 (fp8 / f16 KV) | concurrency path; the old "67% single-stream loop" was largely a bad-checkpoint/Marlin/stale-container artifact — a clean export ≈ llama's ~1/5 floor (`docs/precision-and-reasoning-loops.md` UPDATE 2026-06-30) |
 
 The 35B (MoE) is *faster* than the 9B (dense) despite being ~4× larger: only ~2–3B of its 35B
 params are active per token. That's also why **GPU utilization looks low during generation**
@@ -101,8 +101,12 @@ self-fix task (backtracking regex), **N=15 seeds**, loop = reasoning-uniqueness 
 | Q4_K_M | llama.cpp | Q4_K_M | f16 | 0%* | [0%, 20%] |
 
 \* 16K-window lower bound — a full-trace (56K) analysis shows both k-quants loop **~1/5** (some loops
-develop gradually past 16K). **KV precision is null** (fp8 == f16); **4-bit vs 6-bit is a wash**. The
-67% is an **NVFP4-format + vLLM/Marlin-decode artifact on SM120, not bit-width** (clean controls).
+develop gradually past 16K). **KV precision is null** (fp8 == f16); **4-bit vs 6-bit is a wash**.
+
+> **UPDATE 2026-06-30:** the 67% was *not* "NVFP4 is bad" — a re-probe (current vLLM nightly, native
+> FlashInfer-CUTLASS, + a *properly-exported* NVFP4) cut it to ~25% ≈ llama.cpp's ~1/5 floor. The 67% was
+> a stale-container + forced-Marlin + **low-quality-checkpoint** stack (our export trips vLLM's `reduced
+> accuracy` warning, #36094). See `docs/precision-and-reasoning-loops.md` UPDATE.
 vLLM is also *non-deterministic* here (same seed → uniq 0.23/0.42/0.47), so loop-*rate* is the statistic.
 
 **Code-correctness battery** (eval+trie, 5 seeds, compiles **and** passes tests): **Q4_K_M 10/10**,

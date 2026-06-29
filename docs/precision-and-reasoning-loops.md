@@ -3,6 +3,31 @@
 *Measured 2026-06-29 on one RTX 5090 (32 GB). Variables isolated, a falsifiable mechanism, and an
 honest accounting — including the intermediate claims that turned out wrong.*
 
+## ⚠️ UPDATE (2026-06-30): the 67% was mostly a BAD-CHECKPOINT + Marlin + stale-container artifact
+
+A re-probe on a **current** vLLM nightly changes the headline. The original 67% was measured on a
+late-June nightly with **Marlin W4A16 forced** (native NVFP4-MoE crashed then, vLLM #35566/#31085) and on
+**our own NVFP4 export**, which vLLM flags on load with `weight global scale is different for parallel
+layers … reduced accuracy` — a known low-quality-export issue (vLLM **#36094**, "Qwen3.5 NVFP4 checkpoint
+has poor accuracy", fixed by *re-exporting* the checkpoint). Re-running the same regex loop sweep
+(single-stream, same seeds):
+
+| stack | loop rate |
+|---|---|
+| our export · Marlin · old container (this study) | 67% (10/15) |
+| our export · **native** FlashInfer-CUTLASS · new container | ~38% (3/8) |
+| **clean** export (AEON-7 W4A16 MLP-only, attn+GatedDeltaNet kept BF16) · new container | ~25% (2/8) |
+| llama.cpp Q4 (full-trace) | ~1/5 |
+
+So a **properly-exported NVFP4 checkpoint on a current vLLM ≈ llama.cpp's intrinsic ~1/5 floor.** The
+"NVFP4+vLLM is bad / abandon for single-stream" framing below was an **overstatement** — the excess above
+~20% was a stale-container + forced-Marlin + low-quality-checkpoint stack. **What SURVIVES is this study's
+real mechanism:** the **quant-independent ~1/5 commit-failure loop** (a *clean* NVFP4 still loops ~25%,
+like llama.cpp). The key export lever (per AEON's recipe): **W4A16 weight-only** keeps activations in
+BF16 — "the NVFP4 reasoning penalty comes from FP4 *activations* (W4A4)." Directional only: small N (8/8
+vs 15), vLLM is nondeterministic, and the re-probe cells move more than one variable each. The original
+analysis below stands as the record of how we first (over)read it.
+
 ## The symptom
 On the hardest self-fix task (a backtracking **regex matcher**), vLLM serving the **NVFP4** 35B
 frequently falls into a **degenerate reasoning loop**: it re-emits *"Let me use a different approach.

@@ -17,11 +17,17 @@ Query at temp **0.6–1.0 / top_p 0.95 / top_k 20 / min_p 0 / max_tokens ≥ 32K
 | | vLLM + NVFP4 | llama.cpp + Q6_K | **llama.cpp + Q4_K_M** |
 |---|---|---|---|
 | **Sustained decode** | 214–232 tok/s | ~150 tok/s | **237–242 tok/s** ✅ |
-| **Reasoning-loop rate** | **67%** (severe) | ~1/5 (occasional) | ~1/5 (occasional) |
+| **Reasoning-loop rate** | 67%→**~1/5**† | ~1/5 (occasional) | ~1/5 (occasional) |
 | **Correctness battery** (eval+trie) | eval ties | 8/10 | **10/10** |
 | **Size on disk / VRAM** | 21 GB | 28.5 GB | **21 GB** |
 | **Fits fully on the 5090?** | yes | **no** (needs `--n-cpu-moe`) | **yes** ✅ |
 | **Best for** | concurrency / many agents | max weight fidelity | **single-stream daily use** |
+
+† **UPDATE 2026-06-30:** the vLLM "67%" was *our* low-quality NVFP4 export on forced-Marlin + a stale
+container — a re-probe with a current nightly (native FlashInfer-CUTLASS) + a *properly-exported* NVFP4
+(W4A16 MLP-only) loops ~25% ≈ llama.cpp's ~1/5 floor. So Q4_K_M still wins on **speed + simplicity** (it's
+faster and needs no Docker/quant-quality care), **not** because "NVFP4 loops." See
+`docs/precision-and-reasoning-loops.md` UPDATE.
 
 ## Why Q4_K_M wins — three findings
 

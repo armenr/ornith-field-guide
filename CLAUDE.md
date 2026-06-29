@@ -62,10 +62,13 @@ scripts/smoke-vllm.sh           # proves it answers + THINKS + reports tok/s
   Only fall back to `MODE=stable` (`--enforce-eager`, ~26 tok/s) if you hit a CUDA-graph crash/hang.
 - **Force Marlin (W4A16)** via the env vars in the script — native NVFP4-MoE kernels crash on SM120.
 - VRAM: `--gpu-memory-utilization 0.75 --max-num-seqs 1 --kv-cache-dtype fp8` (the OOM fix).
-- **Caveat: vLLM/NVFP4 falls into a reasoning *loop* ~67% of the time on the hardest single-stream
-  tasks** — an NVFP4-format + vLLM-decode artifact, NOT bit-width (clean controls in
-  `docs/precision-and-reasoning-loops.md`). Its *code* is fine (eval ties), but for single-stream
-  reliability use llama.cpp **Q4_K_M**. Reserve vLLM for **concurrency** (many parallel agents).
+- **Caveat (UPDATED 2026-06-30): the old "vLLM/NVFP4 loops ~67%" was mostly a bad-checkpoint +
+  forced-Marlin + stale-container artifact, not "NVFP4 is bad."** A current vLLM nightly auto-uses native
+  FlashInfer-CUTLASS (no Marlin forcing), and a *properly-exported* NVFP4 (W4A16 MLP-only, attn+GatedDeltaNet
+  kept BF16 — e.g. AEON-7's export) loops ~25% ≈ llama.cpp's intrinsic ~1/5 floor. Our own `ornith-nvfp4`
+  export is low-quality (trips vLLM's `reduced accuracy` fused-scale warning, #36094). Still: for
+  single-stream **simplicity/speed** use llama.cpp **Q4_K_M**; vLLM's reason to exist is **concurrency**.
+  Serve clean NVFP4 with `--mamba-cache-dtype float32`. Full re-probe: `docs/precision-and-reasoning-loops.md` UPDATE.
 
 ## Querying (OpenAI-compatible)
 ```bash

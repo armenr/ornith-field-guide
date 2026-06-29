@@ -3,6 +3,15 @@
 *Measured 2026-06-29, RTX 5090. The deeper "why" behind `docs/precision-and-reasoning-loops.md`.
 Reproduce with `scripts/probe-logits.py` and `scripts/kl-sweep.py` + `scripts/compare-kl.py`.*
 
+> **⚠️ UPDATE (2026-06-30): the *rate* was inflated by a bad checkpoint; this RCA's *mechanism* survives.**
+> A re-probe (current vLLM nightly, native FlashInfer-CUTLASS, + a properly-exported NVFP4 that keeps
+> attention/GatedDeltaNet in BF16) cut the loop 67% → ~25% ≈ llama.cpp's ~1/5 floor. So "67% = the
+> NVFP4+vLLM path is bad" was an overstatement — much of it was a stale-container + forced-Marlin +
+> low-quality-export stack (our export trips vLLM's `reduced accuracy` fused-scale warning, #36094). **But
+> the core finding here is VINDICATED:** the loop is a **quant-independent, intrinsic ~1/5 commit-failure**
+> at flat forks — exactly the ~20% floor a *clean* NVFP4 still shows. See the UPDATE in
+> `docs/precision-and-reasoning-loops.md`. Directional (small N, vLLM nondeterministic).
+
 ## Question
 vLLM-NVFP4 falls into a reasoning loop ~67% of the time on the hardest task; llama.cpp-Q4 ~1/5. The
 loop-rate study proved it's the NVFP4+vLLM *path*, not bit-width. This asks the next level down: **what,

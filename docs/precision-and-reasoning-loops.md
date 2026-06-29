@@ -72,14 +72,24 @@ Self-fix convergence battery (eval + trie, 5 seeds each, compiles **and** passes
 Q4 *edged* Q6 here — the opposite of the regex-window result. Net across all tests: **statistically
 indistinguishable at this sample size.** 4-bit k-quant costs nothing measurable on real code.
 
-## The mechanism (first principles)
-A degenerate *semantic* repetition (whole sentences re-drawn, not token stutter) is the signature of a
-**flattened next-token distribution failing to break symmetry** at a "commit vs reconsider" reasoning
-fork. When decode noise is comparable to the logit margin, sampling keeps re-drawing "reconsider." This
-predicts everything observed: hardest/most-open-ended task only (eval/trie have crisp forks → no loop);
-probabilistic, not on/off; a repetition penalty breaks it. **But the clean controls prove generic
-precision is *not* the source here** (KV null, Q4≈Q6 null) — for this model it's the NVFP4-format +
-vLLM-Marlin decode that produces the symptom, not bit-width.
+## The mechanism (measured — and the obvious hypothesis was WRONG)
+The intuitive story — *"NVFP4 flattens the commit-vs-reconsider distribution, so sampling can't break
+symmetry"* — is **false at the per-token level.** We tested it directly (logit-probe RCA, full writeup
+in `docs/vllm-rca.md`):
+- At decision forks, NVFP4-vLLM and Q4-llama have **nearly identical** next-token entropy (~2.1 vs ~2.2)
+  and top-1 margin (0.14 vs 0.13). NVFP4 does **not** make the forks flatter.
+- The forks **are** inherently flat for *both* quants (entropy ~2.1 vs ~0.6 at unambiguous points) — so
+  Ornith is loop-*prone* on hard reasoning regardless of quant, but that's quant-independent.
+
+The data instead point to **compounding trajectory divergence.** Per-token the two engines agree on the
+argmax only **~75%** of the time (mean Jensen-Shannon divergence 0.073, up to 0.28; measured over 8
+forks / 24 positions of 1 shared trajectory — small n). Over a ~30K-token
+reasoning chain those small, frequent differences **accumulate** into divergent trajectories, and the
+NVFP4-vLLM path lands in the degenerate "try a different approach" loop far more often. This explains
+the stochasticity, why only the longest task (regex) triggers it, why a repetition penalty breaks it,
+and why code quality is unaffected. The divergence bundles quant (NVFP4 vs Q4_K) **and** engine/sampler
+(vLLM/Marlin vs llama) — not separable on one GPU — but the *mechanism is compounding drift, not logit
+flattening.*
 
 ## Honesty trail — claims we made and then falsified with more data
 1. *"Precision dose-response, both axes matter"* (n=1/seed) → **wrong, noise.**

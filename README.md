@@ -126,11 +126,15 @@ scripts/
   multilang-battery.py     # Q4-vs-Q6 convergence across Rust/Python/Go/TS (real compile+test)
   seed-sweep-regex.py      # quick per-seed uniqueness sweep vs any server
   needle-test.py           # long-context needle-in-haystack recall test
+  probe-logits.py          # next-token entropy/margin at decision forks (RCA)
+  kl-sweep.py              # per-position top-20 logprobs along a shared trajectory (RCA)
+  compare-kl.py            # top-1 agreement + JS divergence between two engines (RCA)
 docs/
   optimized-config.md      # ⭐ the daily-driver recommendation + the data behind it
   context-window.md        # how much context is real (256K native; why >256K doesn't work)
   quant-by-language.md     # Q4 vs Q6 across Rust/Python/Go/TS (a wash; Rust is hardest)
   precision-and-reasoning-loops.md  # controlled study: why NVFP4-on-vLLM loops (it's not bit-width)
+  vllm-rca.md              # logit-level RCA: the loop is compounding drift, NOT logit-flattening
   settings.md              # sampling + runtime (temperature + output-budget lessons) — READ THIS
   benchmarks.md            # measured tok/s, VRAM, sizes, self-correction + the quant study
   observations.md          # model behavior, quality, "we never found its ceiling", unreleased-31B

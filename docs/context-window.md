@@ -56,3 +56,21 @@ Daily driver at **`-c 262144 -np 1`** for max single-request context (`scripts/s
 If your desktop is VRAM-hungry and 30.6 GB is too tight, drop to `--cache-type-k q8_0 --cache-type-v
 q8_0` (256K at ~27 GB; q8 KV *should* be near-lossless for recall — but recall was only needle-verified
 at f16 KV here, so treat that as expectation, not measurement).
+
+## On vLLM, the serving window is a *separate, usually smaller* ceiling — and it bites differently
+
+The 256K above is the **llama.cpp** story. If you serve Ornith on **vLLM** (NVFP4, for concurrency /
+native tool-parsing), `--max-model-len` is set at serve time and is typically much smaller (we ran a
+heavy at **32768**). Three things to know:
+
+- **Check the RUNNING window, not your compose file.** The container that's actually up can differ from
+  what you think you launched: `curl -s :8000/v1/models | python3 -c "import sys,json;print(json.load(sys.stdin)['data'][0]['max_model_len'])"`.
+  Treat that number as the truth.
+- **`prompt_tokens + max_tokens` must fit under it — or vLLM returns `HTTP 400 Bad Request`.** This reads
+  like a malformed request but it's almost always a context **overflow**. Ornith is a verbose reasoner
+  (12–30K thinking tokens), so a big prompt + a big output budget collide on a modest window. Fix: cap the
+  prompt (truncate long inputs — status/headers/a sample is enough for most decisions) and keep
+  `max_tokens` generous; don't let both grow into the ceiling.
+- **The vLLM window is a VRAM tradeoff** (bigger `--max-model-len` ⇒ bigger fp8 KV pool ⇒ less free VRAM),
+  and a second vLLM process can't claim a window if the first already holds the card. Raise the window
+  only if you've freed the VRAM for it; for most workloads 32–64K is plenty.

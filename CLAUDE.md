@@ -83,8 +83,12 @@ curl -s http://127.0.0.1:8095/v1/chat/completions -d '{
     `reasoning_content` on vLLM does **not** mean thinking is off — check `reasoning`.
   - If you ever see `<think>` inside `content`, the reasoning parser isn't on.
 - **`finish_reason:"length"` with empty `content` = the model used the whole budget *thinking* and never
-  emitted the answer.** Raise `max_tokens` (the regex task alone needed >32K thinking tokens). This is
-  the single most common "it returned nothing / it's broken" cause on hard problems.
+  emitted the answer.** Raise `max_tokens` **or just RETRY** (it's stochastic at temp 0.6 — a smaller
+  budget can even force earlier emission). This is the single most common "it returned nothing / it's
+  broken" cause on hard problems.
+- **On vLLM, check the *running* `max_model_len`** (`curl :8000/v1/models`), not your compose — they can
+  differ. `prompt + max_tokens` over it = **HTTP 400** (a context overflow, not a bad request); cap the
+  prompt and keep the budget generous. Full breadcrumbs: `docs/context-window.md` (vLLM section) + `docs/vllm-rca.md` (UPDATE 2: verified a well-built NVFP4 runs clean end-to-end).
 - **Give big `max_tokens` (≥ 32000) and `-c` ≥ 65536.** It's an extremely verbose reasoner
   (~30,000 thinking tokens on hard problems). Too-small a budget truncates the answer and makes the
   model *look* broken — this is the #2 mistake after wrong temperature. Empty `content` +

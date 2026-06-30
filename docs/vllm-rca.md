@@ -69,3 +69,23 @@ path lands in the degenerate loop far more often. The divergences are not a dire
   ~75% agreement; compounding drift) is clear; exact divergence magnitudes are indicative.
 - To fully isolate quant-vs-engine you'd need a matched-format run on both engines (e.g. an AWQ/GPTQ both
   support, or NVFP4 weights on a second vLLM-vs-SGLang comparison) — future work.
+
+## UPDATE 2 (2026-06-30): verified end-to-end — a well-built NVFP4 just *works* on vLLM
+
+Beyond the logit re-probe, we then **ran a well-built NVFP4 export end-to-end on a current vLLM nightly
+across an extended, multi-call workload** — many `/v1/chat/completions` with large thinking budgets,
+native tool-calls, and structured JSON outputs. It served, thought, single-streamed, emitted native tool
+calls (`--tool-call-parser qwen3_xml`) alongside `--reasoning-parser qwen3` (chain-of-thought →
+`reasoning`, answer/JSON → `content`), and did **not** fall into the reasoning loop. That closes the
+case: the earlier "67% loop" was the **bad checkpoint/snapshot + forced-Marlin + stale container**, not
+"NVFP4-on-vLLM is broken." A properly-exported NVFP4 (W4A16, MLP-only quantized, attention + Gated-Delta-
+Net kept BF16) is a perfectly good way to run this on vLLM — serve a clean one with `--mamba-cache-dtype float32`.
+
+**Operational kinks that fell out of that run** (also in `docs/context-window.md` + `docs/settings.md`):
+- **Check the RUNNING `max_model_len`** (`curl :8000/v1/models`), not your compose file — they can differ.
+  `prompt + max_tokens` must fit it or vLLM returns **HTTP 400** (a context *overflow*, not a malformed request).
+- **The verbose reasoner occasionally emits empty `content` + `finish_reason:"length"`** (it spent the
+  whole budget thinking). A big `max_tokens` reduces this; the robust fix is to **RETRY on empty output** —
+  it's stochastic at temp 0.6. (Counter-intuitively, a *smaller* budget can force earlier emission.)
+- **Native tool-calling works** (`qwen3_xml`) together with the reasoning parser — handy if you drive
+  Ornith agentically over the OpenAI-compatible API.
